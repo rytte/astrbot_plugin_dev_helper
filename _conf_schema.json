@@ -1,0 +1,14 @@
+{
+  "chatlog_default_count": {
+    "description": "会话记录默认条数",
+    "type": "int",
+    "default": 10,
+    "hint": "取值 1–100。/chatlog 未指定条目数时使用；命令中指定的条目数优先。按已保存记录条目计数，不是对话轮数。"
+  },
+  "logs_default_count": {
+    "description": "日志默认条数",
+    "type": "int",
+    "default": 30,
+    "hint": "取值 1–100。/logs 和 /logs warning 未指定条目数时共用此值；命令中指定的条目数优先。warning 先筛选级别，再取最近的记录。"
+  }
+}

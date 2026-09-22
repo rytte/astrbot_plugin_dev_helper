@@ -1,0 +1,6 @@
+name: astrbot_plugin_dev_helper
+display_name: 开发助手
+desc: 管理员命令与模型工具查询、最近日志和当前会话记录。
+version: v0.2.8
+author: rytte
+astrbot_version: ">=4.27.4,<5"
