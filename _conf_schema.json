@@ -3,12 +3,18 @@
     "description": "会话记录默认条数",
     "type": "int",
     "default": 10,
-    "hint": "取值 1–100。/chatlog 未指定条目数时使用；命令中指定的条目数优先。按已保存记录条目计数，不是对话轮数。"
+    "hint": "取值 1–100。/chatlog 和 /chatlog-pic 未指定条目数时共用；命令中指定的条目数优先。按已保存记录条目计数，不是对话轮数。"
   },
   "logs_default_count": {
     "description": "日志默认条数",
     "type": "int",
     "default": 30,
-    "hint": "取值 1–100。/logs 和 /logs warning 未指定条目数时共用此值；命令中指定的条目数优先。warning 先筛选级别，再取最近的记录。"
+    "hint": "取值 1–100。/logs、/logs-pic 及各自的 warning 子命令未指定条目数时共用此值；命令中指定的条目数优先。warning 先筛选级别，再取最近的记录。"
+  },
+  "browser_executable": {
+    "description": "浏览器可执行文件路径",
+    "type": "string",
+    "default": "",
+    "hint": "留空使用 Playwright 安装的 Chromium，也可由管理员配置本地 Chromium 或 Edge 路径。填写浏览器可执行文件的绝对路径，不加引号；两个图片命令共用，保存后生效。路径无效或启动失败时明确报错，不自动切换。"
   }
 }

@@ -75,7 +75,10 @@ def test_invalid_config_values_fail_with_field_and_range(env, field, value):
         (None, "配置必须是对象"),
         ([], "配置必须是对象"),
         ({}, "缺少配置项"),
-        ({"chatlog_default_count": 20}, "缺少配置项：logs_default_count"),
+        (
+            {"chatlog_default_count": 20},
+            "缺少配置项：browser_executable、logs_default_count",
+        ),
         (
             {"chatlog_default_count": 20, "logs_default_count": 30, "unknown": 10},
             "未知配置项，请移除：unknown",
@@ -85,3 +88,32 @@ def test_invalid_config_values_fail_with_field_and_range(env, field, value):
 def test_invalid_config_shape_is_rejected(env, config, message):
     with pytest.raises(ValueError, match=message):
         env.main.Main(env.context, config)
+
+
+def test_browser_configuration_defaults_to_playwright(env):
+    assert env.plugin.picture_renderer.executable_path == ""
+
+
+def test_browser_path_configuration_reaches_renderer(env, tmp_path):
+    executable = tmp_path / "Browser With Spaces" / "msedge.exe"
+    executable.parent.mkdir()
+    executable.write_bytes(b"test executable")
+    plugin = env.main.Main(
+        env.context, dict(env.plugin_config, browser_executable=str(executable))
+    )
+    assert plugin.picture_renderer.executable_path == str(executable)
+
+
+@pytest.mark.parametrize("value", [" ", "edge", "msedge.exe", True, 1, None, []])
+def test_invalid_browser_configuration_is_rejected(env, value):
+    config = dict(env.plugin_config, browser_executable=value)
+    with pytest.raises(ValueError, match="browser_executable"):
+        env.main.Main(env.context, config)
+
+
+def test_missing_or_directory_browser_path_is_rejected(env, tmp_path):
+    for path in (tmp_path, tmp_path / "missing.exe"):
+        with pytest.raises(ValueError, match="已存在的浏览器可执行文件绝对路径"):
+            env.main.Main(
+                env.context, dict(env.plugin_config, browser_executable=str(path))
+            )

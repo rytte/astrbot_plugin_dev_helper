@@ -8,19 +8,29 @@ from collections.abc import AsyncIterator
 
 from astrbot.api import AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.message_components import Image
 from astrbot.api.star import Context, Star
 from astrbot.core.log import LogQueueHandler
 from astrbot.core.star.filter.command import GreedyStr
 
 from .catalog import command_conflicts, command_entries, tool_entries
 from .display import history_text, positive_number, redact
+from .pictures import LocalPictureRenderer, PictureBlock, PictureDocument, RenderError
 
 INSPECT_USAGE = (
     "/inspect commands [页码]\n/inspect tools [页码]\n/inspect plugin <插件标识> [页码]"
 )
 LOG_USAGE = "/logs [条目数]\n/logs warning [条目数]"
+LOG_PIC_USAGE = "/logs-pic [条目数]\n/logs-pic warning [条目数]"
 HELP = (
-    "\n查询\n" + INSPECT_USAGE + "\n\n日志与对话\n" + LOG_USAGE + "\n/chatlog [条目数]"
+    "\n查询\n"
+    + INSPECT_USAGE
+    + "\n\n日志与对话\n"
+    + LOG_USAGE
+    + "\n/chatlog [条目数]"
+    + "\n\n图片输出\n"
+    + LOG_PIC_USAGE
+    + "\n/chatlog-pic [条目数]"
 )
 PAGE_SIZE = 20
 
@@ -32,7 +42,8 @@ class Main(Star):
         super().__init__(context)
         if not isinstance(config, dict):
             raise ValueError("开发助手配置必须是对象。")
-        fields = {"chatlog_default_count", "logs_default_count"}
+        count_fields = {"chatlog_default_count", "logs_default_count"}
+        fields = count_fields | {"browser_executable"}
         if unknown := config.keys() - fields:
             raise ValueError(
                 "开发助手存在未知配置项，请移除："
@@ -40,12 +51,13 @@ class Main(Star):
             )
         if missing := fields - config.keys():
             raise ValueError("开发助手缺少配置项：" + "、".join(sorted(missing)))
-        for field in sorted(fields):
+        for field in sorted(count_fields):
             value = config[field]
             if type(value) is not int or not 1 <= value <= 100:
                 raise ValueError(f"开发助手配置 {field} 必须是 1–100 的整数。")
         self.chatlog_default_count = config["chatlog_default_count"]
         self.logs_default_count = config["logs_default_count"]
+        self.picture_renderer = LocalPictureRenderer(config["browser_executable"])
         self.ready = False
 
     async def initialize(self) -> None:
@@ -94,6 +106,27 @@ class Main(Star):
             await self.reply(event, "开发助手命令冲突：" + "、".join(conflicts))
             return False
         return True
+
+    async def reply_pictures(
+        self, event: AstrMessageEvent, document: PictureDocument
+    ) -> AsyncIterator[None]:
+        """Render all pages locally, then yield each image for standard delivery."""
+        event.should_call_llm(False)
+        try:
+            images = await self.picture_renderer.render(document)
+        except RenderError as error:
+            await self.reply(event, str(error))
+            yield
+            return
+        for image in images:
+            event.set_result(
+                event.chain_result([Image.fromBytes(image)])
+                .use_t2i(False)
+                .use_markdown(False)
+            )
+            yield
+            if event.is_stopped():
+                return
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command(
@@ -199,17 +232,36 @@ class Main(Star):
         yield
         event.stop_event()
 
-    async def _logs(self, event: AstrMessageEvent, arguments: str) -> None:
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command(
+        "logs-pic",
+        desc="日志等级配色图片：logs-pic [条目数] 或 logs-pic warning [条目数]。仅限管理员私聊。",
+    )
+    async def logs_pic(
+        self, event: AstrMessageEvent, arguments: GreedyStr
+    ) -> AsyncIterator[None]:
+        document = await self._logs(event, arguments, picture=True)
+        if document is None:
+            yield
+        else:
+            async for _ in self.reply_pictures(event, document):
+                yield
+        event.stop_event()
+
+    async def _logs(
+        self, event: AstrMessageEvent, arguments: str, picture: bool = False
+    ) -> PictureDocument | None:
         """Read the existing log cache, filtering levels before taking the tail."""
         if not await self.authorize(event, private=True):
             return
         args = arguments.split()
+        usage = LOG_PIC_USAGE if picture else LOG_USAGE
         try:
             warning_only = bool(args and args[0] == "warning")
             if warning_only:
                 args = args[1:]
             if len(args) > 1:
-                raise ValueError("用法：\n" + LOG_USAGE)
+                raise ValueError("用法：\n" + usage)
             count = positive_number(
                 args[0] if args else "", self.logs_default_count, 100
             )
@@ -241,11 +293,24 @@ class Main(Star):
                 "级别：WARNING 及以上" if warning_only else "级别：全部",
                 "",
             ]
+            if picture:
+                return PictureDocument(
+                    title="最近日志",
+                    summary=redact("\n".join(lines[:2])),
+                    blocks=tuple(
+                        PictureBlock(
+                            redact(record["data"].rstrip("\r\n")),
+                            "log",
+                            record["level"],
+                        )
+                        for record in selected
+                    ),
+                )
             for record in selected:
                 lines.append(redact(record["data"].rstrip("\r\n")))
             await self.reply(event, "\n".join(lines))
         except ValueError as error:
-            await self.reply(event, f"{error}\n用法：\n{LOG_USAGE}")
+            await self.reply(event, f"{error}\n用法：\n{usage}")
         except Exception:
             self.logger.exception("Failed to read the AstrBot log cache.")
             await self.reply(event, "日志源数据读取失败，请检查 AstrBot 日志服务。")
@@ -263,14 +328,33 @@ class Main(Star):
         yield
         event.stop_event()
 
-    async def _chatlog(self, event: AstrMessageEvent, arguments: str) -> None:
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command(
+        "chatlog-pic",
+        desc="当前会话 JSON 高亮图片：chatlog-pic [条目数]。省略条目数时使用插件配置。",
+    )
+    async def chatlog_pic(
+        self, event: AstrMessageEvent, arguments: GreedyStr
+    ) -> AsyncIterator[None]:
+        document = await self._chatlog(event, arguments, picture=True)
+        if document is None:
+            yield
+        else:
+            async for _ in self.reply_pictures(event, document):
+                yield
+        event.stop_event()
+
+    async def _chatlog(
+        self, event: AstrMessageEvent, arguments: str, picture: bool = False
+    ) -> PictureDocument | None:
         """Read the current saved history without creating or changing a session."""
         if not await self.authorize(event):
             return
         try:
             args = arguments.split()
             if len(args) > 1:
-                raise ValueError("用法：/chatlog [条目数]")
+                command = "chatlog-pic" if picture else "chatlog"
+                raise ValueError(f"用法：/{command} [条目数]")
             count = positive_number(
                 args[0] if args else "", self.chatlog_default_count, 100
             )
@@ -311,6 +395,28 @@ class Main(Star):
             lines = [
                 f"当前会话记录\n会话：{origin}\n对话：{cid}\n共 {len(records)} 条，显示最近 {len(selected)} 条（按消息计数）"
             ]
+            if picture:
+                return PictureDocument(
+                    title="当前会话记录 · JSON",
+                    summary=redact(
+                        f"会话：{origin}\n对话：{cid}\n共 {len(records)} 条，显示第 "
+                        f"{len(records) - len(selected) + 1}–{len(records)} 条（按消息计数）\n"
+                        "仅显示已保存记录，可能不含尚未落库的消息及动态系统提示词。"
+                    ),
+                    blocks=(
+                        PictureBlock(
+                            json.dumps(
+                                [
+                                    json.loads(history_text(record))
+                                    for record in selected
+                                ],
+                                ensure_ascii=False,
+                                indent=2,
+                            ),
+                            "json",
+                        ),
+                    ),
+                )
             for index, record in enumerate(selected, len(records) - len(selected) + 1):
                 lines.append(f"#{index} {record['role']}\n{history_text(record)}")
             lines.append(

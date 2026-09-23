@@ -81,7 +81,9 @@ async def test_removed_command_is_available_to_other_plugins(env, command):
     assert not env.model_calls
 
 
-@pytest.mark.parametrize("command", ["/inspect", "/logs 1", "/chatlog 1"])
+@pytest.mark.parametrize(
+    "command", ["/inspect", "/logs 1", "/chatlog 1", "/logs-pic 1", "/chatlog-pic 1"]
+)
 async def test_non_admin_is_denied_by_real_pipeline(env, command):
     event = env.event(command, user="member", admin=False)
     await env.scheduler.execute(event)
@@ -89,7 +91,9 @@ async def test_non_admin_is_denied_by_real_pipeline(env, command):
     env.context.conversation_manager.get_curr_conversation_id.assert_not_awaited()
 
 
-@pytest.mark.parametrize("method", ["inspect", "logs", "chatlog"])
+@pytest.mark.parametrize(
+    "method", ["inspect", "logs", "chatlog", "logs_pic", "chatlog_pic"]
+)
 async def test_direct_calls_and_api_role_cannot_bypass_authorization(env, method):
     event = env.event(user="member", admin=False)
     await env.invoke(method, event, "bad extra arguments")
@@ -295,7 +299,10 @@ async def test_group_aliases_permission_and_parent_disabled_state(env):
     assert "管理员" in entry.details and "m say" in entry.details
 
 
-async def test_command_conflicts_fail_initialization_and_diagnostic_execution(env):
+@pytest.mark.parametrize("command", ["logs", "logs-pic", "chatlog-pic"])
+async def test_command_conflicts_fail_initialization_and_diagnostic_execution(
+    env, command
+):
     async def colliding(self, event):
         raise AssertionError("Must not dispatch this handler during the test")
 
@@ -307,7 +314,7 @@ async def test_command_conflicts_fail_initialization_and_diagnostic_execution(en
         colliding,
         [],
     )
-    handler.event_filters = [CommandFilter("other", {"logs"}, handler)]
+    handler.event_filters = [CommandFilter("other", {command}, handler)]
     env.registry.append(handler)
     plugin = env.main.Main(env.context, env.plugin_config)
     with pytest.raises(RuntimeError, match="命令冲突"):
