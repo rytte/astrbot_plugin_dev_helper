@@ -82,7 +82,16 @@ async def test_removed_command_is_available_to_other_plugins(env, command):
 
 
 @pytest.mark.parametrize(
-    "command", ["/inspect", "/logs 1", "/chatlog 1", "/logs-pic 1", "/chatlog-pic 1"]
+    "command",
+    [
+        "/inspect",
+        "/logs 1",
+        "/chatlog 1",
+        "/logs-pic 1",
+        "/chatlog-pic 1",
+        "/ctx",
+        "/ctx-pic",
+    ],
 )
 async def test_non_admin_is_denied_by_real_pipeline(env, command):
     event = env.event(command, user="member", admin=False)
@@ -92,7 +101,8 @@ async def test_non_admin_is_denied_by_real_pipeline(env, command):
 
 
 @pytest.mark.parametrize(
-    "method", ["inspect", "logs", "chatlog", "logs_pic", "chatlog_pic"]
+    "method",
+    ["inspect", "logs", "chatlog", "logs_pic", "chatlog_pic", "ctx", "ctx_pic"],
 )
 async def test_direct_calls_and_api_role_cannot_bypass_authorization(env, method):
     event = env.event(user="member", admin=False)
@@ -118,6 +128,9 @@ async def test_direct_calls_and_api_role_cannot_bypass_authorization(env, method
         ("chatlog", "-1"),
         ("chatlog", "1000"),
         ("chatlog", "20 extra"),
+        ("ctx", "0"),
+        ("ctx", "101"),
+        ("ctx", "5 extra"),
         ("inspect", "plugins"),
     ],
 )
@@ -299,7 +312,9 @@ async def test_group_aliases_permission_and_parent_disabled_state(env):
     assert "管理员" in entry.details and "m say" in entry.details
 
 
-@pytest.mark.parametrize("command", ["logs", "logs-pic", "chatlog-pic"])
+@pytest.mark.parametrize(
+    "command", ["logs", "logs-pic", "chatlog-pic", "ctx", "ctx-pic"]
+)
 async def test_command_conflicts_fail_initialization_and_diagnostic_execution(
     env, command
 ):

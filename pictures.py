@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from html import escape
 from pathlib import Path
 from typing import Literal
@@ -15,6 +15,7 @@ from .display import redact
 WIDTH = 1200
 LINE_HEIGHT = 28
 PAGE_LINES = 56
+TABLE_PAGE_ROWS = 20
 LOG_COLORS = {
     "DEBUG": ("#6cb6d9", "bold"),
     "INFO": ("#72c4cc", "bold"),
@@ -32,10 +33,17 @@ class PictureBlock:
 
 
 @dataclass(frozen=True)
+class PictureTable:
+    columns: tuple[str, ...]
+    rows: tuple[tuple[str, ...], ...]
+
+
+@dataclass(frozen=True)
 class PictureDocument:
     title: str
     summary: str
     blocks: tuple[PictureBlock, ...]
+    table: PictureTable | None = None
 
 
 class RenderError(RuntimeError):
@@ -63,6 +71,24 @@ def build_html(document: PictureDocument) -> str:
             )
         else:
             blocks.append(f"<pre><span>{escape(text)}</span></pre>")
+    if document.table is not None:
+        table = document.table
+        if any(len(row) != len(table.columns) for row in table.rows):
+            raise ValueError("图片表格列数不一致。")
+        columns = "".join(
+            f"<th>{escape(redact(column))}</th>" for column in table.columns
+        )
+        rows = "".join(
+            "<tr>"
+            + "".join(f"<td>{escape(redact(cell))}</td>" for cell in row)
+            + "</tr>"
+            for row in table.rows
+        )
+        blocks.append(
+            '<table class="usage-table"><colgroup><col class="round-column">'
+            '<col class="time-column"></colgroup>'
+            f"<thead><tr>{columns}</tr></thead><tbody>{rows}</tbody></table>"
+        )
     return f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; font-src 'none'">
@@ -80,6 +106,17 @@ h1 {{ margin: 0 0 12px; font-size: 26px; line-height: 36px; color: #eee; }}
   line-height: {LINE_HEIGHT}px; white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 4; }}
 #content pre.log {{ padding-left: 26ch; text-indent: -26ch; }}
 pre:empty::before {{ content: "\\00a0"; }}
+.usage-table {{ width: 100%; border-collapse: collapse; table-layout: fixed;
+  font-size: 16px; line-height: {LINE_HEIGHT}px; font-variant-numeric: tabular-nums; }}
+.usage-table .round-column {{ width: 68px; }}
+.usage-table .time-column {{ width: 180px; }}
+.usage-table th, .usage-table td {{ text-align: right; padding: 14px 12px;
+  border-bottom: 1px solid #343c43; overflow-wrap: anywhere; }}
+.usage-table th {{ color: #9cdcfe; background: #252d34; font-weight: normal; }}
+.usage-table td {{ color: #e3e8ed; }}
+.usage-table th:nth-child(-n+2), .usage-table td:nth-child(-n+2) {{ text-align: left; }}
+.usage-table tbody tr:nth-child(even) {{ background: #22282d; }}
+.usage-table td:first-child {{ color: #72c4cc; }}
 footer {{ margin-top: 20px; padding-top: 12px; border-top: 1px solid #414141;
   font-size: 14px; line-height: 20px; color: #888; }}
 {formatter.get_style_defs(".json")}
@@ -134,7 +171,19 @@ class LocalPictureRenderer:
     async def _render(self, document: PictureDocument) -> list[bytes]:
         from playwright.async_api import Error, async_playwright
 
-        html = await asyncio.to_thread(build_html, document)
+        documents = [document]
+        if document.table is not None:
+            documents = [
+                replace(
+                    document,
+                    table=replace(
+                        document.table,
+                        rows=document.table.rows[start : start + TABLE_PAGE_ROWS],
+                    ),
+                )
+                for start in range(0, max(1, len(document.table.rows)), TABLE_PAGE_ROWS)
+            ]
+        html = await asyncio.to_thread(build_html, documents[0])
         async with async_playwright() as playwright:
             try:
                 browser = await playwright.chromium.launch(
@@ -160,6 +209,23 @@ class LocalPictureRenderer:
                 await page.route("**/*", lambda route: route.abort())
                 await page.set_content(html, wait_until="load")
                 await page.evaluate("document.fonts.ready")
+                if document.table is not None:
+                    images = []
+                    for index, sheet in enumerate(documents):
+                        if index:
+                            await page.set_content(
+                                await asyncio.to_thread(build_html, sheet),
+                                wait_until="load",
+                            )
+                            await page.evaluate("document.fonts.ready")
+                        await page.locator("#footer").evaluate(
+                            "(el, label) => el.textContent = label",
+                            f"开发助手 · 第 {index + 1} / {len(documents)} 页",
+                        )
+                        images.append(
+                            await page.locator("#sheet").screenshot(type="png")
+                        )
+                    return images
                 height = await page.locator("#content").evaluate(
                     "el => el.scrollHeight"
                 )

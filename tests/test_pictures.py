@@ -12,10 +12,12 @@ from astrbot.api.message_components import Image
 from astrbot_plugin_dev_helper.pictures import (
     LINE_HEIGHT,
     PAGE_LINES,
+    TABLE_PAGE_ROWS,
     WIDTH,
     LocalPictureRenderer,
     PictureBlock,
     PictureDocument,
+    PictureTable,
     RenderError,
     build_html,
 )
@@ -307,3 +309,77 @@ async def test_browser_launch_failure_does_not_switch_browsers(
     launcher.assert_awaited_once_with(
         headless=True, executable_path=executable_path or None
     )
+
+
+@pytest.mark.skipif(
+    os.environ.get("PICTURE_TESTS") != "1", reason="Requires installed browser"
+)
+@pytest.mark.parametrize(
+    "executable_path",
+    [""]
+    + (
+        [os.environ["PICTURE_TEST_EXECUTABLE"]]
+        if os.environ.get("PICTURE_TEST_EXECUTABLE")
+        else []
+    ),
+)
+async def test_usage_table_pages_keep_complete_rows_and_repeat_headers(
+    monkeypatch, executable_path
+):
+    from playwright.async_api import Locator
+
+    columns = (
+        "轮次",
+        "时间",
+        "输入",
+        "输出",
+        "缓存读取",
+        "缓存写入",
+        "非缓存输入",
+        "思考",
+        "合计",
+    )
+    rows = tuple(
+        (
+            str(i),
+            "09-23 15:10:36",
+            "106,177",
+            "653",
+            "0",
+            "—",
+            "106,177",
+            "100",
+            "106,830",
+        )
+        for i in range(1, 2 * TABLE_PAGE_ROWS + 2)
+    )
+    document = PictureDocument("上下文用量", "tokens", (), PictureTable(columns, rows))
+    captured = []
+    screenshot = Locator.screenshot
+
+    async def capture(locator, *args, **kwargs):
+        headers = await locator.locator("th").all_text_contents()
+        cells = await locator.locator("tbody tr").evaluate_all(
+            "rows => rows.map(row => [...row.cells].map(cell => cell.textContent))"
+        )
+        footer = await locator.locator("footer").inner_text()
+        assert await locator.locator("#content").evaluate(
+            "el => el.scrollWidth === el.clientWidth"
+        )
+        assert await locator.locator("tbody tr").evaluate_all(
+            "rows => rows.every(row => [...row.cells].every(cell => cell.scrollWidth <= cell.clientWidth))"
+        )
+        captured.append((headers, cells, footer))
+        return await screenshot(locator, *args, **kwargs)
+
+    monkeypatch.setattr(Locator, "screenshot", capture)
+    images = await LocalPictureRenderer(executable_path).render(document)
+    assert len(images) == 3
+    assert [len(page[1]) for page in captured] == [TABLE_PAGE_ROWS, TABLE_PAGE_ROWS, 1]
+    assert tuple(tuple(row) for page in captured for row in page[1]) == rows
+    for index, (headers, _, footer) in enumerate(captured, 1):
+        assert headers == list(columns)
+        assert footer == f"开发助手 · 第 {index} / 3 页"
+    sizes = [PILImage.open(io.BytesIO(data)).size for data in images]
+    assert all(width == WIDTH for width, _ in sizes)
+    assert sizes[0] == sizes[1] and sizes[2][1] < sizes[0][1]

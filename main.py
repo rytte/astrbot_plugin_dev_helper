@@ -9,11 +9,14 @@ from collections.abc import AsyncIterator
 from astrbot.api import AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image
+from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star
+from astrbot.core.agent.message import dump_messages_with_checkpoints
 from astrbot.core.log import LogQueueHandler
 from astrbot.core.star.filter.command import GreedyStr
 
 from .catalog import command_conflicts, command_entries, tool_entries
+from .context_usage import ContextUsage, format_round, history_hashes, usage_picture
 from .display import history_text, positive_number, redact
 from .pictures import LocalPictureRenderer, PictureBlock, PictureDocument, RenderError
 
@@ -28,9 +31,11 @@ HELP = (
     + "\n\n日志与对话\n"
     + LOG_USAGE
     + "\n/chatlog [条目数]"
+    + "\n/ctx [轮数]"
     + "\n\n图片输出\n"
     + LOG_PIC_USAGE
     + "\n/chatlog-pic [条目数]"
+    + "\n/ctx-pic [轮数]"
 )
 PAGE_SIZE = 20
 
@@ -58,6 +63,7 @@ class Main(Star):
         self.chatlog_default_count = config["chatlog_default_count"]
         self.logs_default_count = config["logs_default_count"]
         self.picture_renderer = LocalPictureRenderer(config["browser_executable"])
+        self.context_usage = ContextUsage(self)
         self.ready = False
 
     async def initialize(self) -> None:
@@ -429,6 +435,176 @@ class Main(Star):
         except Exception:
             self.logger.exception("Failed to read the current conversation.")
             await self.reply(event, "当前对话读取失败，请检查 AstrBot 存储与日志。")
+
+    async def _usage_conversation(self, event: AstrMessageEvent, cid=None):
+        origin = event.unified_msg_origin
+        manager = self.context.conversation_manager
+        cid = cid or await manager.get_curr_conversation_id(origin)
+        if not cid:
+            return None, None, []
+        conversation = await manager.get_conversation(
+            origin, cid, create_if_not_exists=False
+        )
+        if conversation is None:
+            return cid, None, []
+        if (
+            conversation.user_id != origin
+            or conversation.platform_id != event.get_platform_id()
+        ):
+            raise ValueError("对话归属与当前会话不一致，已拒绝读取。")
+        history = json.loads(conversation.history)
+        if not isinstance(history, list) or any(
+            not isinstance(item, dict) for item in history
+        ):
+            raise ValueError("当前对话记录数据格式错误，无法读取。")
+        return cid, conversation, history
+
+    @filter.on_llm_request()
+    async def capture_context_start(
+        self, event: AstrMessageEvent, request: ProviderRequest
+    ):
+        if not self.ready or request.conversation is None:
+            return
+        try:
+            cid, conversation, history = await self._usage_conversation(
+                event, request.conversation.cid
+            )
+            if conversation is not None:
+                ticket = await self.context_usage.begin(
+                    event.unified_msg_origin, cid, history
+                )
+                event.set_extra("dev_helper_context_ticket", ticket)
+        except Exception:
+            self.logger.exception("Failed to prepare context usage recording.")
+
+    @filter.on_agent_done()
+    async def capture_context_finish(
+        self, event: AstrMessageEvent, run_context, response
+    ):
+        ticket = event.get_extra("dev_helper_context_ticket")
+        if not self.ready or ticket is None or response is None or response.is_chunk:
+            return
+        if response.role != "assistant" or ticket["origin"] != event.unified_msg_origin:
+            return
+        try:
+            messages = [
+                message
+                for message in run_context.messages
+                if not (message.role in {"user", "assistant"} and message._no_save)
+            ]
+            # The last user message and subsequent tool/assistant messages identify
+            # this turn in saved context, including repeated identical answers.
+            start = next(
+                (
+                    i
+                    for i in range(len(messages) - 1, -1, -1)
+                    if messages[i].role == "user"
+                ),
+                None,
+            )
+            if start is not None:
+                anchor = history_hashes(
+                    dump_messages_with_checkpoints(messages[start:])
+                )
+                await self.context_usage.finish(ticket, anchor, response)
+        except Exception:
+            self.logger.exception("Failed to record context usage.")
+
+    @filter.after_message_sent()
+    async def clear_context_usage(self, event: AstrMessageEvent):
+        # Core sets this only after a successful reset/new, including renamed
+        # commands. Other clear operations are reconciled on query or request.
+        if not self.ready or not event.get_extra("_clean_group_context_session", False):
+            return
+        try:
+            cid, _, history = await self._usage_conversation(event)
+            if cid and not history:
+                async with self.context_usage.lock:
+                    await self.context_usage.sync(
+                        self.context_usage.key(event.unified_msg_origin, cid),
+                        history,
+                        force_clear=True,
+                    )
+        except Exception:
+            self.logger.exception("Failed to clear context usage after context reset.")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command(
+        "ctx", desc="查看当前对话最近几轮的上下文用量：ctx [轮数]，默认 5 轮。"
+    )
+    async def ctx(
+        self, event: AstrMessageEvent, arguments: GreedyStr
+    ) -> AsyncIterator[None]:
+        await self._ctx(event, arguments)
+        yield
+        event.stop_event()
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("ctx-pic", desc="上下文用量图片：ctx-pic [轮数]，默认 5 轮。")
+    async def ctx_pic(
+        self, event: AstrMessageEvent, arguments: GreedyStr
+    ) -> AsyncIterator[None]:
+        document = await self._ctx(event, arguments, picture=True)
+        if document is not None:
+            async for _ in self.reply_pictures(event, document):
+                yield
+        else:
+            yield
+        event.stop_event()
+
+    async def _ctx(
+        self, event: AstrMessageEvent, arguments: str, picture: bool = False
+    ) -> PictureDocument | None:
+        if not await self.authorize(event):
+            return
+        usage = "用法：/ctx-pic [轮数]" if picture else "用法：/ctx [轮数]"
+        try:
+            args = arguments.split()
+            if len(args) > 1:
+                raise ValueError(usage)
+            count = positive_number(args[0] if args else "", 5, 100)
+        except ValueError as error:
+            await self.reply(event, f"{error}\n{usage}")
+            return
+        try:
+            cid, conversation, history = await self._usage_conversation(event)
+            if cid is None:
+                await self.reply(event, "当前会话没有选中的对话。")
+                return
+            async with self.context_usage.lock:
+                _, records = await self.context_usage.sync(
+                    self.context_usage.key(event.unified_msg_origin, cid),
+                    history,
+                )
+            if conversation is None:
+                await self.reply(event, "当前会话选中的对话记录不存在。")
+                return
+            if not history:
+                await self.reply(
+                    event, "当前对话上下文为空，暂无已保存轮次的用量记录。"
+                )
+                return
+            lines = ["上下文用量（tokens）"]
+            if records:
+                selected = records[-count:]
+                if picture:
+                    return usage_picture(selected)
+                lines[0] += f"｜最近 {len(selected)} 轮"
+                lines.extend(format_round(record) for record in selected)
+            else:
+                total = conversation.token_usage
+                if type(total) is int and total > 0:
+                    if picture:
+                        return usage_picture([], total)
+                    lines.append(f"最近一次合计：{total:,}（无明细）")
+                else:
+                    lines.append("暂无用量记录。")
+            await self.reply(event, "\n\n".join(lines))
+        except ValueError as error:
+            await self.reply(event, str(error))
+        except Exception:
+            self.logger.exception("Failed to query context usage.")
+            await self.reply(event, "上下文用量读取失败，请检查 AstrBot 日志。")
 
     async def terminate(self) -> None:
         """Mark diagnostics unavailable while AstrBot unloads the plugin."""

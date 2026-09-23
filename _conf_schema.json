@@ -15,6 +15,6 @@
     "description": "浏览器可执行文件路径",
     "type": "string",
     "default": "",
-    "hint": "留空使用 Playwright 安装的 Chromium，也可由管理员配置本地 Chromium 或 Edge 路径。填写浏览器可执行文件的绝对路径，不加引号；两个图片命令共用，保存后生效。路径无效或启动失败时明确报错，不自动切换。"
+    "hint": "留空使用 Playwright 安装的 Chromium，也可由管理员配置本地 Chromium 或 Edge 路径。填写浏览器可执行文件的绝对路径，不加引号；所有图片命令共用，保存后生效。路径无效或启动失败时明确报错，不自动切换。"
   }
 }
