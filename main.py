@@ -47,8 +47,13 @@ class Main(Star):
         super().__init__(context)
         if not isinstance(config, dict):
             raise ValueError("开发助手配置必须是对象。")
+        config = dict(config)
+        if config.pop("browser_executable", ""):
+            self.logger.warning(
+                "dev_helper browser_executable is now configured by astrbot_plugin_browser."
+            )
         count_fields = {"chatlog_default_count", "logs_default_count"}
-        fields = count_fields | {"browser_executable"}
+        fields = count_fields
         if unknown := config.keys() - fields:
             raise ValueError(
                 "开发助手存在未知配置项，请移除："
@@ -62,9 +67,17 @@ class Main(Star):
                 raise ValueError(f"开发助手配置 {field} 必须是 1–100 的整数。")
         self.chatlog_default_count = config["chatlog_default_count"]
         self.logs_default_count = config["logs_default_count"]
-        self.picture_renderer = LocalPictureRenderer(config["browser_executable"])
+        self.picture_renderer = LocalPictureRenderer(self.get_browser_service)
         self.context_usage = ContextUsage(self)
         self.ready = False
+
+    def get_browser_service(self):
+        metadata = self.context.get_registered_star("astrbot_plugin_browser")
+        plugin = metadata.star_cls if metadata and metadata.activated else None
+        service = getattr(plugin, "service", None)
+        if service is None:
+            raise RenderError("浏览器服务不可用，请启用 astrbot_plugin_browser 插件。")
+        return service
 
     async def initialize(self) -> None:
         """Reject conflicting command registrations before enabling diagnostics."""

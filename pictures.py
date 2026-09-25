@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from html import escape
-from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from .display import redact
 
@@ -134,19 +134,10 @@ footer {{ margin-top: 20px; padding-top: 12px; border-top: 1px solid #414141;
 
 
 class LocalPictureRenderer:
-    """Serialize local browser jobs; no remote renderer or asset downloads."""
+    """Serialize picture jobs through the shared offline browser service."""
 
-    def __init__(self, executable_path: str) -> None:
-        if not isinstance(executable_path, str):
-            raise ValueError("开发助手配置 browser_executable 必须是字符串。")
-        if executable_path and (
-            not Path(executable_path).is_absolute()
-            or not Path(executable_path).is_file()
-        ):
-            raise ValueError(
-                "开发助手配置 browser_executable 必须留空或填写已存在的浏览器可执行文件绝对路径，不加引号。"
-            )
-        self.executable_path = executable_path
+    def __init__(self, browser_service_resolver: Callable[[], Any] | None) -> None:
+        self.browser_service_resolver = browser_service_resolver
         self._lock = asyncio.Lock()
 
     async def render(self, document: PictureDocument) -> list[bytes]:
@@ -169,8 +160,6 @@ class LocalPictureRenderer:
                 ) from error
 
     async def _render(self, document: PictureDocument) -> list[bytes]:
-        from playwright.async_api import Error, async_playwright
-
         documents = [document]
         if document.table is not None:
             documents = [
@@ -184,69 +173,52 @@ class LocalPictureRenderer:
                 for start in range(0, max(1, len(document.table.rows)), TABLE_PAGE_ROWS)
             ]
         html = await asyncio.to_thread(build_html, documents[0])
-        async with async_playwright() as playwright:
-            try:
-                browser = await playwright.chromium.launch(
-                    headless=True,
-                    executable_path=self.executable_path or None,
-                )
-            except Error as error:
-                if self.executable_path:
-                    raise RenderError(
-                        "无法启动 browser_executable 指定的浏览器。请确认该文件是可运行的 Chromium 或 Edge，"
-                        "并检查运行权限及系统依赖。"
-                    ) from error
-                raise RenderError(
-                    "无法启动本地 Chromium。请在 AstrBot 的 Python 环境运行 "
-                    "python -m playwright install chromium；Linux 还需安装浏览器系统依赖和中文字体，详见插件 README。"
-                ) from error
-            try:
-                page = await browser.new_page(
-                    viewport={"width": WIDTH, "height": 2100},
-                    device_scale_factor=1,
-                    service_workers="block",
-                )
-                await page.route("**/*", lambda route: route.abort())
-                await page.set_content(html, wait_until="load")
-                await page.evaluate("document.fonts.ready")
-                if document.table is not None:
-                    images = []
-                    for index, sheet in enumerate(documents):
-                        if index:
-                            await page.set_content(
-                                await asyncio.to_thread(build_html, sheet),
-                                wait_until="load",
-                            )
-                            await page.evaluate("document.fonts.ready")
-                        await page.locator("#footer").evaluate(
-                            "(el, label) => el.textContent = label",
-                            f"开发助手 · 第 {index + 1} / {len(documents)} 页",
-                        )
-                        images.append(
-                            await page.locator("#sheet").screenshot(type="png")
-                        )
-                    return images
-                height = await page.locator("#content").evaluate(
-                    "el => el.scrollHeight"
-                )
-                page_height = PAGE_LINES * LINE_HEIGHT
-                count = max(1, math.ceil(height / page_height))
+        service = (
+            self.browser_service_resolver()
+            if self.browser_service_resolver is not None
+            else None
+        )
+        if service is None:
+            raise RenderError("浏览器服务不可用，请启用 astrbot_plugin_browser 插件。")
+        async with service.session(
+            viewport={"width": WIDTH, "height": 2100},
+            javascript_enabled=True,
+            timeout=120,
+        ) as page:
+            await page.set_content(html, wait_until="load")
+            await page.evaluate("document.fonts.ready")
+            if document.table is not None:
                 images = []
-                for index in range(count):
-                    offset = index * page_height
-                    await page.evaluate(
-                        """({offset, height, label}) => {
-                            document.querySelector('#window').style.height = height + 'px';
-                            document.querySelector('#content').style.transform = `translateY(-${offset}px)`;
-                            document.querySelector('#footer').textContent = label;
-                        }""",
-                        {
-                            "offset": offset,
-                            "height": min(page_height, height - offset),
-                            "label": f"开发助手 · 第 {index + 1} / {count} 页",
-                        },
+                for index, sheet in enumerate(documents):
+                    if index:
+                        await page.set_content(
+                            await asyncio.to_thread(build_html, sheet),
+                            wait_until="load",
+                        )
+                        await page.evaluate("document.fonts.ready")
+                    await page.locator("#footer").evaluate(
+                        "(el, label) => el.textContent = label",
+                        f"开发助手 · 第 {index + 1} / {len(documents)} 页",
                     )
                     images.append(await page.locator("#sheet").screenshot(type="png"))
                 return images
-            finally:
-                await browser.close()
+            height = await page.locator("#content").evaluate("el => el.scrollHeight")
+            page_height = PAGE_LINES * LINE_HEIGHT
+            count = max(1, math.ceil(height / page_height))
+            images = []
+            for index in range(count):
+                offset = index * page_height
+                await page.evaluate(
+                    """({offset, height, label}) => {
+                        document.querySelector('#window').style.height = height + 'px';
+                        document.querySelector('#content').style.transform = `translateY(-${offset}px)`;
+                        document.querySelector('#footer').textContent = label;
+                    }""",
+                    {
+                        "offset": offset,
+                        "height": min(page_height, height - offset),
+                        "label": f"开发助手 · 第 {index + 1} / {count} 页",
+                    },
+                )
+                images.append(await page.locator("#sheet").screenshot(type="png"))
+            return images

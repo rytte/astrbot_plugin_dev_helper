@@ -1,6 +1,6 @@
 name: astrbot_plugin_dev_helper
 display_name: 开发助手
 desc: 管理员命令与模型工具查询，支持上下文用量、日志和会话记录的文字、图片输出。
-version: 0.5.0
+version: 0.6.0
 author: rytte
 astrbot_version: ">=4.27.4,<5"

@@ -5,7 +5,7 @@ import io
 import json
 import os
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 from astrbot.api.message_components import Image
@@ -167,7 +167,7 @@ async def test_render_error_is_explicit_and_does_not_send_raw_records(env):
 async def test_local_renderer_reports_dependency_and_timeout_errors(
     monkeypatch, error, message
 ):
-    renderer = LocalPictureRenderer("")
+    renderer = LocalPictureRenderer(lambda: None)
     monkeypatch.setattr(renderer, "_render", AsyncMock(side_effect=error))
     with pytest.raises(RenderError, match=message):
         await renderer.render(PictureDocument("test", "", ()))
@@ -214,20 +214,10 @@ def test_html_escapes_logs_and_highlights_json_after_redaction():
     os.environ.get("PICTURE_TESTS") != "1",
     reason="Set PICTURE_TESTS=1 with the selected browsers installed",
 )
-@pytest.mark.parametrize(
-    "executable_path",
-    [""]
-    + (
-        [os.environ["PICTURE_TEST_EXECUTABLE"]]
-        if os.environ.get("PICTURE_TEST_EXECUTABLE")
-        else []
-    ),
-)
-async def test_real_browser_paginates_without_lost_lines_or_network_requests(
-    executable_path,
-):
+async def test_real_browser_paginates_without_lost_lines_or_network_requests():
     from playwright.async_api import async_playwright
 
+    executable_path = os.environ.get("ASTRBOT_BROWSER_EXECUTABLE", "")
     text = "\n".join(
         f"记录 {i:03d} <img src='https://invalid.example/{i}'>" for i in range(130)
     )
@@ -268,7 +258,14 @@ async def test_real_browser_paginates_without_lost_lines_or_network_requests(
             assert requests == []
         finally:
             await browser.close()
-    images = await LocalPictureRenderer(executable_path).render(document)
+    from astrbot_plugin_browser.service import BrowserService
+
+    service = BrowserService(browser_executable=executable_path or "")
+    await service.initialize()
+    try:
+        images = await LocalPictureRenderer(lambda: service).render(document)
+    finally:
+        await service.close()
     assert len(images) == 3
     sizes = [PILImage.open(io.BytesIO(image)).size for image in images]
     assert all(width == WIDTH for width, height in sizes)
@@ -278,56 +275,18 @@ async def test_real_browser_paginates_without_lost_lines_or_network_requests(
     )
 
 
-@pytest.mark.parametrize(
-    "custom,message",
-    [
-        (False, "python -m playwright install chromium"),
-        (True, "无法启动 browser_executable 指定的浏览器"),
-    ],
-)
-async def test_browser_launch_failure_does_not_switch_browsers(
-    monkeypatch, tmp_path, custom, message
-):
-    import playwright.async_api as api
-
-    executable_path = ""
-    if custom:
-        executable = tmp_path / "edge.exe"
-        executable.write_bytes(b"test executable")
-        executable_path = str(executable)
-    launcher = AsyncMock(side_effect=api.Error("browser unavailable"))
-    context_manager = MagicMock()
-    context_manager.__aenter__ = AsyncMock(
-        return_value=SimpleNamespace(chromium=SimpleNamespace(launch=launcher))
-    )
-    context_manager.__aexit__ = AsyncMock(return_value=False)
-    monkeypatch.setattr(api, "async_playwright", lambda: context_manager)
-    with pytest.raises(RenderError, match=message):
-        await LocalPictureRenderer(executable_path).render(
-            PictureDocument("test", "", ())
-        )
-    launcher.assert_awaited_once_with(
-        headless=True, executable_path=executable_path or None
-    )
+async def test_missing_shared_browser_service_has_actionable_error():
+    with pytest.raises(RenderError, match="请启用 astrbot_plugin_browser"):
+        await LocalPictureRenderer(lambda: None).render(PictureDocument("test", "", ()))
 
 
 @pytest.mark.skipif(
     os.environ.get("PICTURE_TESTS") != "1", reason="Requires installed browser"
 )
-@pytest.mark.parametrize(
-    "executable_path",
-    [""]
-    + (
-        [os.environ["PICTURE_TEST_EXECUTABLE"]]
-        if os.environ.get("PICTURE_TEST_EXECUTABLE")
-        else []
-    ),
-)
-async def test_usage_table_pages_keep_complete_rows_and_repeat_headers(
-    monkeypatch, executable_path
-):
+async def test_usage_table_pages_keep_complete_rows_and_repeat_headers(monkeypatch):
     from playwright.async_api import Locator
 
+    executable_path = os.environ.get("ASTRBOT_BROWSER_EXECUTABLE", "")
     columns = (
         "轮次",
         "时间",
@@ -373,7 +332,14 @@ async def test_usage_table_pages_keep_complete_rows_and_repeat_headers(
         return await screenshot(locator, *args, **kwargs)
 
     monkeypatch.setattr(Locator, "screenshot", capture)
-    images = await LocalPictureRenderer(executable_path).render(document)
+    from astrbot_plugin_browser.service import BrowserService
+
+    service = BrowserService(browser_executable=executable_path or "")
+    await service.initialize()
+    try:
+        images = await LocalPictureRenderer(lambda: service).render(document)
+    finally:
+        await service.close()
     assert len(images) == 3
     assert [len(page[1]) for page in captured] == [TABLE_PAGE_ROWS, TABLE_PAGE_ROWS, 1]
     assert tuple(tuple(row) for page in captured for row in page[1]) == rows

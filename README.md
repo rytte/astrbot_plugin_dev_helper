@@ -2,7 +2,15 @@
 
 AstrBot 管理员使用的开发与排障插件，提供命令与模型工具查询、最近日志、当前会话记录和逐轮上下文用量，支持日志配色图片、JSON 高亮图片和用量表格图片。
 
-插件标识：`astrbot_plugin_dev_helper`。版本：`0.5.0`。图片命令可使用本地 Chromium 或已安装的 Microsoft Edge。
+> [!IMPORTANT]
+>
+> 本插件的 `/xxx-pic` 命令使用的HTML图片渲染能力依赖于 [浏览器服务]([rytte/astrbot_plugin_browser](https://github.com/rytte/astrbot_plugin_browser)) 插件。
+>
+> * `浏览器服务` 插件负责统一启动一个本地无头 Chromium，并为每次渲染提供独立的页面会话。
+>
+> * 避免每个依赖浏览器渲染的插件重复配置，重复启动浏览器、减少内存占用，同时保持离线渲染和任务隔离。
+>
+> * 如果需要使用相关命令，请安装并启用浏览器服务插件。
 
 ## 安装依赖
 
@@ -10,15 +18,14 @@ AstrBot 管理员使用的开发与排障插件，提供命令与模型工具查
 
 将本目录放到实例的 `data/plugins/astrbot_plugin_dev_helper`，或在 WebUI 上传 `dist/astrbot_plugin_dev_helper.zip`。ZIP 根目录包含插件入口及元数据。配置 AstrBot 管理员后发送 `/inspect` 检查加载结果。
 
-图片渲染使用 Playwright 和 Pygments，依赖声明在 `requirements.txt` 中。请在 **运行 AstrBot 的同一 Python 环境和系统用户下**安装 Python 依赖：
+图片渲染通过 `astrbot_plugin_browser` 共享本地 Chromium。请安装并启用该浏览器服务插件；Pygments 等开发助手自身依赖仍由本插件的 `requirements.txt` 管理：
 
 ```sh
 python -m pip install -r data/plugins/astrbot_plugin_dev_helper/requirements.txt
+python -m pip install -r data/plugins/astrbot_plugin_browser/requirements.txt
 ```
 
-已安装 **Microsoft Edge** 时，在插件配置的「浏览器可执行文件路径」中填写 Edge 的绝对路径并保存即可，**无需安装 Chromium**。例如 Windows 常见路径为 `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`；直接填写路径，不加引号。也可填写本地 Chromium 路径。插件使用独立的无头浏览器实例，不使用日常浏览器的登录状态或用户配置。
-
-该配置留空（初始默认值）时使用 Playwright 安装的 Chromium，需要另行安装对应的浏览器：
+在浏览器服务插件的配置中设置浏览器可执行文件路径。留空时使用 Playwright 安装的 Chromium：
 
 ```sh
 python -m playwright install chromium
@@ -40,7 +47,6 @@ Linux 使用 Chromium 时可执行 `python -m playwright install --with-deps chr
 | --- | --- | --- | --- |
 | `chatlog_default_count` | 会话记录默认条数 | 10 | `/chatlog`、`/chatlog-pic` 省略条目数时共用 |
 | `logs_default_count` | 日志默认条数 | 30 | `/logs`、`/logs-pic` 及各自的 `warning` 子命令共用 |
-| `browser_executable` | 浏览器可执行文件路径 | 空字符串 | 留空使用 Playwright 安装的 Chromium，也可由管理员配置本地 Chromium 或 Edge 路径；所有图片命令共用 |
 
 两个条数配置项均为 1–100 的整数。命令中显式指定的条目数优先于配置，例如 `/chatlog 10` 始终查询最近 10 条；记录不足时返回实际可用条目。插件加载时校验配置，收到非法值或未知配置项会明确报错。
 
@@ -142,6 +148,6 @@ Agent 委派入口及其嵌套工具会一并列出，子工具注明所属 Agen
 ../AstrBot/.venv/Scripts/ruff.exe format --check .
 ```
 
-安装 Playwright 的 Chromium 后，设置环境变量 `PICTURE_TESTS=1` 运行测试，可额外验证真实浏览器分页、中文排版及无网络请求；另设 `PICTURE_TEST_EXECUTABLE` 为 Edge 或本地 Chromium 的绝对路径，会一并验证指定浏览器。未启用时仅跳过浏览器集成测试。
+设置环境变量 `PICTURE_TESTS=1` 运行测试，可额外验证真实浏览器分页、中文排版及无网络请求。测试使用 `ASTRBOT_BROWSER_EXECUTABLE` 指定的浏览器；未设置时使用 Playwright Chromium。未启用时仅跳过浏览器集成测试。
 
 源码在其他位置时设置 `ASTRBOT_SOURCE`。测试将运行数据隔离到系统临时目录，使用真实事件、命令过滤器和标准消息流水线；平台发送和会话服务使用隔离替身，不连接聊天平台或付费模型。尚未做真实 QQ 等平台的联调。
