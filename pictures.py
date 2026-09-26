@@ -44,6 +44,15 @@ class PictureDocument:
     summary: str
     blocks: tuple[PictureBlock, ...]
     table: PictureTable | None = None
+    max_pages: int | None = None
+
+
+class PicturePages(list[bytes]):
+    """Rendered pages with the full page count before applying a display limit."""
+
+    def __init__(self, images: list[bytes], total_pages: int) -> None:
+        super().__init__(images)
+        self.total_pages = total_pages
 
 
 class RenderError(RuntimeError):
@@ -160,6 +169,8 @@ class LocalPictureRenderer:
                 ) from error
 
     async def _render(self, document: PictureDocument) -> list[bytes]:
+        if document.max_pages is not None and document.max_pages < 1:
+            raise ValueError("图片页数上限必须大于 0。")
         documents = [document]
         if document.table is not None:
             documents = [
@@ -189,7 +200,7 @@ class LocalPictureRenderer:
             await page.evaluate("document.fonts.ready")
             if document.table is not None:
                 images = []
-                for index, sheet in enumerate(documents):
+                for index, sheet in enumerate(documents[: document.max_pages]):
                     if index:
                         await page.set_content(
                             await asyncio.to_thread(build_html, sheet),
@@ -201,12 +212,12 @@ class LocalPictureRenderer:
                         f"开发助手 · 第 {index + 1} / {len(documents)} 页",
                     )
                     images.append(await page.locator("#sheet").screenshot(type="png"))
-                return images
+                return PicturePages(images, len(documents))
             height = await page.locator("#content").evaluate("el => el.scrollHeight")
             page_height = PAGE_LINES * LINE_HEIGHT
             count = max(1, math.ceil(height / page_height))
             images = []
-            for index in range(count):
+            for index in range(min(count, document.max_pages or count)):
                 offset = index * page_height
                 await page.evaluate(
                     """({offset, height, label}) => {
@@ -220,5 +231,10 @@ class LocalPictureRenderer:
                         "label": f"开发助手 · 第 {index + 1} / {count} 页",
                     },
                 )
+                if document.max_pages is not None and count > document.max_pages:
+                    await page.locator("#footer").evaluate(
+                        "(el, label) => el.textContent = label",
+                        f"开发助手 · 第 {index + 1} / {count} 页 · 仅展示前 {document.max_pages} 页，完整内容见文本附件",
+                    )
                 images.append(await page.locator("#sheet").screenshot(type="png"))
-            return images
+            return PicturePages(images, count)

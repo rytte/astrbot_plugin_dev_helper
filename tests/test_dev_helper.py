@@ -91,6 +91,7 @@ async def test_removed_command_is_available_to_other_plugins(env, command):
         "/chatlog-pic 1",
         "/ctx",
         "/ctx-pic",
+        "/term ls",
     ],
 )
 async def test_non_admin_is_denied_by_real_pipeline(env, command):
@@ -102,7 +103,7 @@ async def test_non_admin_is_denied_by_real_pipeline(env, command):
 
 @pytest.mark.parametrize(
     "method",
-    ["inspect", "logs", "chatlog", "logs_pic", "chatlog_pic", "ctx", "ctx_pic"],
+    ["inspect", "logs", "chatlog", "logs_pic", "chatlog_pic", "ctx", "ctx_pic", "term"],
 )
 async def test_direct_calls_and_api_role_cannot_bypass_authorization(env, method):
     event = env.event(user="member", admin=False)

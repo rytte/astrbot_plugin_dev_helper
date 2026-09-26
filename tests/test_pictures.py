@@ -264,9 +264,18 @@ async def test_real_browser_paginates_without_lost_lines_or_network_requests():
     await service.initialize()
     try:
         images = await LocalPictureRenderer(lambda: service).render(document)
+        limited = await LocalPictureRenderer(lambda: service).render(
+            PictureDocument(
+                "终端执行结果",
+                "输出仅展示第一页",
+                (PictureBlock(text),),
+                max_pages=1,
+            )
+        )
     finally:
         await service.close()
     assert len(images) == 3
+    assert len(limited) == 1 and limited.total_pages == 3
     sizes = [PILImage.open(io.BytesIO(image)).size for image in images]
     assert all(width == WIDTH for width, height in sizes)
     assert sizes[0] == sizes[1]

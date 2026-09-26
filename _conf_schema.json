@@ -10,5 +10,23 @@
     "type": "int",
     "default": 30,
     "hint": "取值 1–100。/logs、/logs-pic 及各自的 warning 子命令未指定条目数时共用此值；命令中指定的条目数优先。warning 先筛选级别，再取最近的记录。"
+  },
+  "terminal_max_pages": {
+    "description": "终端图片最大页数",
+    "type": "int",
+    "default": 5,
+    "hint": "取值 1–20。/term 超过此页数时仅发送前 N 页图片，并附上经过脱敏的完整文本；执行超时或容量限制导致的截断也会在附件中注明。"
+  },
+  "terminal_timeout": {
+    "description": "终端执行超时（秒）",
+    "type": "int",
+    "default": 60,
+    "hint": "取值 1–600。超时后终止命令进程树，并展示终止前收集的输出。"
+  },
+  "terminal_max_output_bytes": {
+    "description": "终端输出容量上限（字节）",
+    "type": "int",
+    "default": 1048576,
+    "hint": "取值 1024–10485760，默认 1 MiB。标准输出与错误输出共用此上限，超过后终止进程并明确标注截断。"
   }
 }

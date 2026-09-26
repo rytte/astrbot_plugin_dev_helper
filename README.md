@@ -1,10 +1,10 @@
 # 开发助手
 
-AstrBot 管理员使用的开发与排障插件，提供命令与模型工具查询、最近日志、当前会话记录和逐轮上下文用量，支持日志配色图片、JSON 高亮图片和用量表格图片。
+AstrBot 管理员使用的开发与排障插件，提供命令与模型工具查询、最近日志、当前会话记录、逐轮上下文用量和系统终端执行，支持本地 HTML 图片输出。
 
 > [!IMPORTANT]
 >
-> 本插件的 `/xxx-pic` 命令使用的HTML图片渲染能力依赖于 [浏览器服务]([rytte/astrbot_plugin_browser](https://github.com/rytte/astrbot_plugin_browser)) 插件。
+> 本插件的 `/xxx-pic` 与 `/term` 命令使用的 HTML 图片渲染能力依赖于 [浏览器服务](https://github.com/rytte/astrbot_plugin_browser) 插件。
 >
 > * `浏览器服务` 插件负责统一启动一个本地无头 Chromium，并为每次渲染提供独立的页面会话。
 >
@@ -47,6 +47,9 @@ Linux 使用 Chromium 时可执行 `python -m playwright install --with-deps chr
 | --- | --- | --- | --- |
 | `chatlog_default_count` | 会话记录默认条数 | 10 | `/chatlog`、`/chatlog-pic` 省略条目数时共用 |
 | `logs_default_count` | 日志默认条数 | 30 | `/logs`、`/logs-pic` 及各自的 `warning` 子命令共用 |
+| `terminal_max_pages` | 终端图片最大页数 | 5 | 1–20；超过时发送前 N 页图片及文本附件 |
+| `terminal_timeout` | 终端执行超时（秒） | 60 | 1–600；超时终止进程树并保留已收集输出 |
+| `terminal_max_output_bytes` | 终端输出容量上限（字节） | 1048576 | 1024–10485760；默认 1 MiB，超过后终止执行并注明截断 |
 
 两个条数配置项均为 1–100 的整数。命令中显式指定的条目数优先于配置，例如 `/chatlog 10` 始终查询最近 10 条；记录不足时返回实际可用条目。插件加载时校验配置，收到非法值或未知配置项会明确报错。
 
@@ -54,7 +57,7 @@ Linux 使用 Chromium 时可执行 `python -m playwright install --with-deps chr
 
 ## 命令
 
-示例中的 `/` 使用 AstrBot 实际配置的唤醒前缀。所有命令仅限 AstrBot 管理员，不使用长选项参数。
+示例中的 `/` 使用 AstrBot 实际配置的唤醒前缀。所有命令仅限 AstrBot 管理员；查询命令不使用长选项参数，`/term` 原样接受 shell 命令及其参数。
 
 | 命令 | 功能 |
 | --- | --- |
@@ -70,6 +73,7 @@ Linux 使用 Chromium 时可执行 `python -m playwright install --with-deps chr
 | `/logs-pic warning [条目数]` | WARNING、ERROR、CRITICAL 日志图片 |
 | `/chatlog-pic [条目数]` | 当前会话已保存记录的 JSON 高亮图片，默认条数与 `/chatlog` 相同 |
 | `/ctx-pic [轮数]` | 当前对话逐轮上下文用量表格图片，默认 5 轮，范围 1–100 |
+| `/term <命令>` | 管理员私聊执行原生终端命令，返回命令及结果图片，长输出附文本文件 |
 
 目录每页 20 项，默认第一页，输出给出下一页命令。日志与会话记录的条目数为 1–100；错误参数、多余参数和未知子命令明确拒绝。
 
@@ -84,7 +88,31 @@ Linux 使用 Chromium 时可执行 `python -m playwright install --with-deps chr
 /ctx-pic 5
 ```
 
-`inspect`、`logs`、`chatlog`、`ctx`、`logs-pic`、`chatlog-pic`、`ctx-pic` 是七个注册的根命令，子命令由各自入口严格解析。命令转模型工具等插件若需要引用本插件，应使用根命令标识，并通过其参数传入子命令。
+`inspect`、`logs`、`chatlog`、`ctx`、`logs-pic`、`chatlog-pic`、`ctx-pic`、`term` 是八个注册的根命令。命令转模型工具等插件若需要引用本插件，应使用根命令标识，并通过其参数传入子命令或 shell 命令。
+
+## 终端执行
+
+`/term` 仅限管理员私聊，直接在运行 AstrBot 的机器上执行命令，使用 AstrBot 进程的系统权限。Docker 部署时在容器内执行。支持系统 shell 及已安装程序的原生命令、选项、管道、重定向和多行脚本，不另行实现或限制 `ls`、`cat`、`git` 等命令。
+
+Windows 优先使用 PATH 中的 PowerShell 7（`pwsh`），否则使用 Windows PowerShell；均以非交互模式启动且不加载个人 profile。Linux/macOS 使用 `/bin/sh`。命令是否可用及参数语法由实际 shell 和系统环境决定；Windows 可直接使用 PowerShell 的 `ls`、`cat` 别名，Git 需安装并加入 PATH。
+
+首次执行的工作目录与 AstrBot 当前会话的本地工具工作区一致，通常是 `data/workspaces/<规范化会话标识>`；ChatUI 项目的共享或自定义工作区沿用 AstrBot 自身解析，目录尚不存在时创建。成功的 `cd` 或 `Set-Location` 会在后续 `/term` 命令中继续生效，按会话和管理员身份隔离；工作区设置变化、插件重载或 AstrBot 重启会重置目录。`cd` 不会改变 AstrBot 主进程的工作目录。
+
+每次命令启动一个独立 shell，仅保留文件系统工作目录，不保留 shell 变量、环境变量修改、函数、别名或后台任务；不支持需要交互输入的编辑器、密码提示等。需要连续使用的 shell 状态可放在同一条 `/term` 中执行。
+
+```text
+/term pwd
+/term ls
+/term cd "子目录 with space"
+/term git status
+/term cat README.md
+```
+
+图片采用深色等宽字体，展示执行目录、执行后的当前目录、原始命令、合并的标准输出及错误输出、退出码和耗时。长行自动换行，每页最多 56 行正文，默认最多发送 5 页；超过时附上 UTF-8 文本文件，包含展示页数之外的输出。附件通过 AstrBot 标准文件消息发送，需要平台适配器支持文件发送，发送后本地临时附件被删除。
+
+执行默认超时 60 秒；标准输出和错误输出共用 1 MiB 容量上限，超过后终止命令进程树。超时和容量截断均在图片及文本中明确标注；文本附件只包含终止前已收集的结果。图片和附件都经过同一脱敏流程与 HTML 转义，但自由文本中的秘密无法保证全部自动识别。终端执行可能修改文件及系统状态，命令具有真实副作用。
+
+执行前先检查浏览器服务是否可用，不可用时返回错误；命令执行后如截图失败，会说明命令已执行并发送文本结果，避免为获取结果重复执行命令。插件卸载时终止仍在运行的终端任务。
 
 ## 查询结果
 

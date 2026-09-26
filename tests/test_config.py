@@ -104,3 +104,29 @@ def test_legacy_browser_path_is_accepted_but_not_owned_by_dev_helper(env):
         env.context, dict(env.plugin_config, browser_executable="old/path/msedge.exe")
     )
     assert plugin.picture_renderer.browser_service_resolver.__self__ is plugin
+
+
+@pytest.mark.parametrize(
+    "field,minimum,maximum",
+    [
+        ("terminal_max_pages", 1, 20),
+        ("terminal_timeout", 1, 600),
+        ("terminal_max_output_bytes", 1024, 10485760),
+    ],
+)
+def test_terminal_config_validates_integer_ranges(env, field, minimum, maximum):
+    for value in (True, "5", 1.5, minimum - 1, maximum + 1, None):
+        with pytest.raises(ValueError, match=field):
+            env.main.Main(env.context, dict(env.plugin_config, **{field: value}))
+    for value in (minimum, maximum):
+        plugin = env.main.Main(env.context, dict(env.plugin_config, **{field: value}))
+        assert getattr(plugin, field) == value
+
+
+def test_existing_config_receives_terminal_defaults(env):
+    plugin = env.main.Main(
+        env.context, {"chatlog_default_count": 10, "logs_default_count": 30}
+    )
+    assert plugin.terminal_max_pages == 5
+    assert plugin.terminal.timeout == 60
+    assert plugin.terminal.max_bytes == 1048576

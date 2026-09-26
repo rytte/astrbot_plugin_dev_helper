@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import tempfile
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 from astrbot.api import AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import Image
+from astrbot.api.message_components import File, Image
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star
 from astrbot.core.agent.message import dump_messages_with_checkpoints
@@ -19,6 +22,7 @@ from .catalog import command_conflicts, command_entries, tool_entries
 from .context_usage import ContextUsage, format_round, history_hashes, usage_picture
 from .display import history_text, positive_number, redact
 from .pictures import LocalPictureRenderer, PictureBlock, PictureDocument, RenderError
+from .terminal import TerminalRunner, session_workspace
 
 INSPECT_USAGE = (
     "/inspect commands [页码]\n/inspect tools [页码]\n/inspect plugin <插件标识> [页码]"
@@ -36,6 +40,7 @@ HELP = (
     + LOG_PIC_USAGE
     + "\n/chatlog-pic [条目数]"
     + "\n/ctx-pic [轮数]"
+    + "\n\n终端（管理员私聊）\n/term <命令>"
 )
 PAGE_SIZE = 20
 
@@ -53,13 +58,18 @@ class Main(Star):
                 "dev_helper browser_executable is now configured by astrbot_plugin_browser."
             )
         count_fields = {"chatlog_default_count", "logs_default_count"}
-        fields = count_fields
+        terminal_fields = {
+            "terminal_max_pages": (5, 1, 20),
+            "terminal_timeout": (60, 1, 600),
+            "terminal_max_output_bytes": (1048576, 1024, 10485760),
+        }
+        fields = count_fields | terminal_fields.keys()
         if unknown := config.keys() - fields:
             raise ValueError(
                 "开发助手存在未知配置项，请移除："
                 + "、".join(sorted(map(str, unknown)))
             )
-        if missing := fields - config.keys():
+        if missing := count_fields - config.keys():
             raise ValueError("开发助手缺少配置项：" + "、".join(sorted(missing)))
         for field in sorted(count_fields):
             value = config[field]
@@ -67,6 +77,16 @@ class Main(Star):
                 raise ValueError(f"开发助手配置 {field} 必须是 1–100 的整数。")
         self.chatlog_default_count = config["chatlog_default_count"]
         self.logs_default_count = config["logs_default_count"]
+        for field, (default, minimum, maximum) in terminal_fields.items():
+            value = config.get(field, default)
+            if type(value) is not int or not minimum <= value <= maximum:
+                raise ValueError(
+                    f"开发助手配置 {field} 必须是 {minimum}–{maximum} 的整数。"
+                )
+            setattr(self, field, value)
+        self.terminal = TerminalRunner(
+            timeout=self.terminal_timeout, max_bytes=self.terminal_max_output_bytes
+        )
         self.picture_renderer = LocalPictureRenderer(self.get_browser_service)
         self.context_usage = ContextUsage(self)
         self.ready = False
@@ -125,6 +145,90 @@ class Main(Star):
             await self.reply(event, "开发助手命令冲突：" + "、".join(conflicts))
             return False
         return True
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command(
+        "term", desc="执行系统终端命令并返回图片：term <命令>。仅限管理员私聊。"
+    )
+    async def term(
+        self, event: AstrMessageEvent, arguments: GreedyStr
+    ) -> AsyncIterator[None]:
+        if not await self.authorize(event):
+            yield
+            event.stop_event()
+            return
+        if not event.is_private_chat():
+            await self.reply(event, "请在管理员私聊中使用终端。")
+            yield
+            event.stop_event()
+            return
+        # AstrBot's GreedyStr normalizes whitespace; preserve the original shell text.
+        raw = event.get_message_str()
+        command = arguments.strip()
+        if raw == "term" or (raw.startswith("term") and raw[4:5].isspace()):
+            command = raw[4:].strip()
+        if not command or "\x00" in command:
+            await self.reply(event, "用法：/term <命令>。命令不能包含 NUL 字符。")
+            yield
+            event.stop_event()
+            return
+        event.should_call_llm(False)
+        try:
+            # Check rendering availability before running a potentially mutating command.
+            self.get_browser_service()
+            root = await session_workspace(self.context, event.unified_msg_origin)
+            result = await self.terminal.execute(
+                (event.unified_msg_origin, event.get_sender_id()), root, command
+            )
+        except RenderError as error:
+            await self.reply(event, str(error))
+            yield
+            event.stop_event()
+            return
+        except Exception:
+            self.logger.error("Terminal execution failed before producing a result.")
+            await self.reply(
+                event, "终端执行失败，请检查工作目录和系统 shell 是否可用。"
+            )
+            yield
+            event.stop_event()
+            return
+        attachment = False
+        try:
+            document = await asyncio.to_thread(result.document, self.terminal_max_pages)
+            images = await self.picture_renderer.render(document)
+        except RenderError as error:
+            await self.reply(event, f"命令已执行。{error}\n执行结果将以文本附件发送。")
+            yield
+            images = []
+            attachment = True
+        for picture in images:
+            event.set_result(
+                event.chain_result([Image.fromBytes(picture)])
+                .use_t2i(False)
+                .use_markdown(False)
+            )
+            yield
+            if event.is_stopped():
+                return
+        attachment |= (
+            getattr(images, "total_pages", len(images)) > self.terminal_max_pages
+        )
+        if attachment:
+            # Standard delivery consumes the file while the generator is suspended.
+            with tempfile.TemporaryDirectory(
+                prefix="astrbot-terminal-result-"
+            ) as folder:
+                path = Path(folder) / "terminal-output.txt"
+                transcript = await asyncio.to_thread(result.transcript)
+                await asyncio.to_thread(path.write_text, transcript, encoding="utf-8")
+                event.set_result(
+                    event.chain_result([File(name=path.name, file=str(path))])
+                    .use_t2i(False)
+                    .use_markdown(False)
+                )
+                yield
+        event.stop_event()
 
     async def reply_pictures(
         self, event: AstrMessageEvent, document: PictureDocument
@@ -622,3 +726,4 @@ class Main(Star):
     async def terminate(self) -> None:
         """Mark diagnostics unavailable while AstrBot unloads the plugin."""
         self.ready = False
+        await self.terminal.close()
