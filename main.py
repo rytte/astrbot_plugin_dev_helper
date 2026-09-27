@@ -47,9 +47,10 @@ HELP = (
     + "\n/chatlog-pic [条目数]"
     + "\n/ctx-pic [轮数]"
     + "\n\n管理（管理员私聊）\n/term <命令>\n/restart"
+    + "\n/plugin remove <插件名>"
 )
 PAGE_SIZE = 20
-RESTART_CONFIRM_SECONDS = 60
+CONFIRM_SECONDS = 60
 
 
 class Main(Star):
@@ -99,6 +100,9 @@ class Main(Star):
         self.ready = False
         self._restart_confirmations: dict[tuple[str, str], float] = {}
         self._restart_started = False
+        self._plugin_removals: dict[
+            tuple[str, str], tuple[float, str, str, object]
+        ] = {}
 
     def get_browser_service(self):
         metadata = self.context.get_registered_star("astrbot_plugin_browser")
@@ -181,9 +185,7 @@ class Main(Star):
         key = (event.unified_msg_origin, event.get_sender_id())
         action = arguments.strip()
         if not action:
-            self._restart_confirmations[key] = (
-                time.monotonic() + RESTART_CONFIRM_SECONDS
-            )
+            self._restart_confirmations[key] = time.monotonic() + CONFIRM_SECONDS
             target = (
                 "整个 AstrBot Desktop 应用"
                 if is_desktop_managed_backend()
@@ -230,6 +232,112 @@ class Main(Star):
             self.logger.exception("Failed to start AstrBot restart task.")
             await self.reply(event, "启动重启任务失败，请检查 AstrBot 日志。")
             yield
+        event.stop_event()
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command(
+        "plugin remove",
+        desc="确认后卸载插件：plugin remove <插件名>。仅限管理员私聊。",
+    )
+    async def plugin_remove(
+        self, event: AstrMessageEvent, arguments: GreedyStr
+    ) -> AsyncIterator[None]:
+        """Uninstall a plugin through the same service used by the WebUI."""
+        if not await self.authorize(event):
+            yield
+            event.stop_event()
+            return
+        if not event.is_private_chat():
+            await self.reply(event, "请在管理员私聊中卸载插件。")
+            yield
+            event.stop_event()
+            return
+
+        tokens = arguments.split()
+        usage = (
+            "用法：/plugin remove <插件名>；"
+            "确认时发送 /plugin remove <插件名> confirm。"
+        )
+        confirming = len(tokens) == 2 and tokens[1] == "confirm"
+        if not tokens or (len(tokens) != 1 and not confirming):
+            await self.reply(event, usage)
+            yield
+            event.stop_event()
+            return
+
+        manager = self.context._star_manager
+        if manager is None:
+            await self.reply(event, "插件管理器不可用，无法卸载插件。")
+            yield
+            event.stop_event()
+            return
+        from astrbot.dashboard.services.plugin_service import PluginService
+
+        service = PluginService(None, manager)
+        name = tokens[0]
+        plugin = service.find_plugin_by_name(name)
+        failed_plugins = manager.failed_plugin_dict
+        failed = plugin is None and name in failed_plugins
+        if plugin is None and not failed:
+            await self.reply(event, f"未找到插件 {name}。")
+            yield
+            event.stop_event()
+            return
+        if plugin is not None and plugin.reserved:
+            await self.reply(event, "该插件是 AstrBot 保留插件，无法卸载。")
+            yield
+            event.stop_event()
+            return
+
+        canonical_name = name if failed else plugin.name
+        kind = "failed" if failed else "loaded"
+        identity = failed_plugins[name] if failed else plugin
+        key = (event.unified_msg_origin, event.get_sender_id())
+        if not confirming:
+            self._plugin_removals[key] = (
+                time.monotonic() + CONFIRM_SECONDS,
+                canonical_name,
+                kind,
+                identity,
+            )
+            await self.reply(
+                event,
+                f"确认卸载 {canonical_name}？将删除插件文件、配置和数据。"
+                f"请在 60 秒内发送 /plugin remove {canonical_name} confirm。",
+            )
+            yield
+            event.stop_event()
+            return
+
+        pending = self._plugin_removals.pop(key, None)
+        if (
+            pending is None
+            or time.monotonic() >= pending[0]
+            or canonical_name != pending[1]
+            or kind != pending[2]
+            or identity is not pending[3]
+        ):
+            await self.reply(event, "卸载确认已过期或插件状态已变化，请重新发送命令。")
+            yield
+            event.stop_event()
+            return
+
+        await self.reply(event, f"正在卸载插件 {canonical_name}。")
+        yield
+        try:
+            payload = {"delete_config": True, "delete_data": True}
+            if failed:
+                await service.uninstall_failed_plugin(
+                    {"dir_name": canonical_name, **payload}
+                )
+            else:
+                await service.uninstall_plugin({"name": canonical_name, **payload})
+        except Exception as exc:
+            self.logger.exception("Failed to uninstall plugin %s.", canonical_name)
+            await self.reply(event, f"卸载插件 {canonical_name} 失败：{exc}")
+        else:
+            await self.reply(event, f"插件 {canonical_name} 已卸载。")
+        yield
         event.stop_event()
 
     @filter.permission_type(filter.PermissionType.ADMIN)

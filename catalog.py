@@ -61,7 +61,7 @@ def command_entries() -> list[Entry]:
             continue
         owner = star_map.get(handler.handler_module_path)
         for command_filter in handler.event_filters:
-            if not isinstance(command_filter, (CommandFilter, CommandGroupFilter)):
+            if not isinstance(command_filter, CommandFilter | CommandGroupFilter):
                 continue
             names = command_filter.get_complete_command_names()
             canonical = names[0]
@@ -208,7 +208,7 @@ def tool_entries(manager) -> list[Entry]:
 
 
 def command_conflicts(module: str) -> list[str]:
-    """Find overlapping root command names, including configured aliases.
+    """Find commands that can consume the same input, including aliases.
 
     Args:
         module: Owning module of this plugin.
@@ -217,22 +217,33 @@ def command_conflicts(module: str) -> list[str]:
         Sorted conflict descriptions, without changing any registry state.
     """
     registrations = [
-        (handler, command_filter.get_complete_command_names())
+        (handler, command_filter, command_filter.get_complete_command_names())
         for handler in star_handlers_registry
         for command_filter in handler.event_filters
-        if isinstance(command_filter, (CommandFilter, CommandGroupFilter))
+        if isinstance(command_filter, CommandFilter | CommandGroupFilter)
     ]
-    own_roots = {
-        name.split()[0]
-        for handler, names in registrations
+    own_commands = [
+        (command_filter, name)
+        for handler, command_filter, names in registrations
         if handler.handler_module_path == module
         for name in names
-    }
+    ]
     conflicts = set()
-    for handler, names in registrations:
+    for handler, command_filter, names in registrations:
         if handler.handler_module_path == module:
             continue
         for name in names:
-            if name.split()[0] in own_roots:
+            if any(
+                own_name == name
+                or (
+                    isinstance(own_filter, CommandFilter)
+                    and name.startswith(own_name + " ")
+                )
+                or (
+                    isinstance(command_filter, CommandFilter)
+                    and own_name.startswith(name + " ")
+                )
+                for own_filter, own_name in own_commands
+            ):
                 conflicts.add(f"{name}（{handler.handler_module_path}）")
     return sorted(conflicts)

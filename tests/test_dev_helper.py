@@ -93,6 +93,7 @@ async def test_removed_command_is_available_to_other_plugins(env, command):
         "/ctx-pic",
         "/term ls",
         "/restart",
+        "/plugin remove anything",
     ],
 )
 async def test_non_admin_is_denied_by_real_pipeline(env, command):
@@ -114,6 +115,7 @@ async def test_non_admin_is_denied_by_real_pipeline(env, command):
         "ctx_pic",
         "term",
         "restart",
+        "plugin_remove",
     ],
 )
 async def test_direct_calls_and_api_role_cannot_bypass_authorization(env, method):
@@ -145,6 +147,7 @@ async def test_direct_calls_and_api_role_cannot_bypass_authorization(env, method
         ("ctx", "5 extra"),
         ("inspect", "plugins"),
         ("restart", "now"),
+        ("plugin_remove", "demo --force"),
     ],
 )
 async def test_unknown_or_discarded_syntax_is_rejected(env, method, arguments):

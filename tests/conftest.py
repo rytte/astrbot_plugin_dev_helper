@@ -154,7 +154,7 @@ async def env(monkeypatch, plugin_config):
             return "".join(
                 text_content(comp.content) if isinstance(comp, Node) else comp.text
                 for comp in components
-                if isinstance(comp, (Node, Plain))
+                if isinstance(comp, Node | Plain)
             )
 
         async def send(chain):
