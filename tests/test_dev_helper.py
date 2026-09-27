@@ -92,6 +92,7 @@ async def test_removed_command_is_available_to_other_plugins(env, command):
         "/ctx",
         "/ctx-pic",
         "/term ls",
+        "/restart",
     ],
 )
 async def test_non_admin_is_denied_by_real_pipeline(env, command):
@@ -103,7 +104,17 @@ async def test_non_admin_is_denied_by_real_pipeline(env, command):
 
 @pytest.mark.parametrize(
     "method",
-    ["inspect", "logs", "chatlog", "logs_pic", "chatlog_pic", "ctx", "ctx_pic", "term"],
+    [
+        "inspect",
+        "logs",
+        "chatlog",
+        "logs_pic",
+        "chatlog_pic",
+        "ctx",
+        "ctx_pic",
+        "term",
+        "restart",
+    ],
 )
 async def test_direct_calls_and_api_role_cannot_bypass_authorization(env, method):
     event = env.event(user="member", admin=False)
@@ -133,6 +144,7 @@ async def test_direct_calls_and_api_role_cannot_bypass_authorization(env, method
         ("ctx", "101"),
         ("ctx", "5 extra"),
         ("inspect", "plugins"),
+        ("restart", "now"),
     ],
 )
 async def test_unknown_or_discarded_syntax_is_rejected(env, method, arguments):
@@ -314,7 +326,7 @@ async def test_group_aliases_permission_and_parent_disabled_state(env):
 
 
 @pytest.mark.parametrize(
-    "command", ["logs", "logs-pic", "chatlog-pic", "ctx", "ctx-pic"]
+    "command", ["logs", "logs-pic", "chatlog-pic", "ctx", "ctx-pic", "restart"]
 )
 async def test_command_conflicts_fail_initialization_and_diagnostic_execution(
     env, command

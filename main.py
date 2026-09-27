@@ -5,7 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import tempfile
+import threading
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -15,11 +18,14 @@ from astrbot.api.message_components import File, Image
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star
 from astrbot.core.agent.message import dump_messages_with_checkpoints
+from astrbot.core.desktop_runtime import is_desktop_managed_backend
 from astrbot.core.log import LogQueueHandler
+from astrbot.core.process_restart import restart_process
 from astrbot.core.star.filter.command import GreedyStr
 
 from .catalog import command_conflicts, command_entries, tool_entries
 from .context_usage import ContextUsage, format_round, history_hashes, usage_picture
+from .desktop_restart import schedule_desktop_restart
 from .display import history_text, positive_number, redact
 from .pictures import LocalPictureRenderer, PictureBlock, PictureDocument, RenderError
 from .terminal import TerminalRunner, session_workspace
@@ -40,9 +46,10 @@ HELP = (
     + LOG_PIC_USAGE
     + "\n/chatlog-pic [条目数]"
     + "\n/ctx-pic [轮数]"
-    + "\n\n终端（管理员私聊）\n/term <命令>"
+    + "\n\n管理（管理员私聊）\n/term <命令>\n/restart"
 )
 PAGE_SIZE = 20
+RESTART_CONFIRM_SECONDS = 60
 
 
 class Main(Star):
@@ -90,6 +97,8 @@ class Main(Star):
         self.picture_renderer = LocalPictureRenderer(self.get_browser_service)
         self.context_usage = ContextUsage(self)
         self.ready = False
+        self._restart_confirmations: dict[tuple[str, str], float] = {}
+        self._restart_started = False
 
     def get_browser_service(self):
         metadata = self.context.get_registered_star("astrbot_plugin_browser")
@@ -145,6 +154,83 @@ class Main(Star):
             await self.reply(event, "开发助手命令冲突：" + "、".join(conflicts))
             return False
         return True
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command(
+        "restart",
+        desc="确认后重启 AstrBot：restart，然后 restart confirm。仅限管理员私聊。",
+    )
+    async def restart(
+        self, event: AstrMessageEvent, arguments: GreedyStr
+    ) -> AsyncIterator[None]:
+        """Restart AstrBot after the same administrator confirms in private chat."""
+        if not await self.authorize(event):
+            yield
+            event.stop_event()
+            return
+        if not event.is_private_chat():
+            await self.reply(event, "请在管理员私聊中使用重启命令。")
+            yield
+            event.stop_event()
+            return
+        if is_desktop_managed_backend() and os.name != "nt":
+            await self.reply(event, "桌面版脚本重启目前仅支持 Windows。")
+            yield
+            event.stop_event()
+            return
+        key = (event.unified_msg_origin, event.get_sender_id())
+        action = arguments.strip()
+        if not action:
+            self._restart_confirmations[key] = (
+                time.monotonic() + RESTART_CONFIRM_SECONDS
+            )
+            target = (
+                "整个 AstrBot Desktop 应用"
+                if is_desktop_managed_backend()
+                else "AstrBot"
+            )
+            await self.reply(
+                event, f"确认重启{target}？请在 60 秒内发送 /restart confirm。"
+            )
+            yield
+            event.stop_event()
+            return
+        if action != "confirm":
+            await self.reply(
+                event, "用法：/restart，然后在 60 秒内发送 /restart confirm。"
+            )
+            yield
+            event.stop_event()
+            return
+
+        deadline = self._restart_confirmations.pop(key, None)
+        if deadline is None or time.monotonic() >= deadline:
+            await self.reply(event, "重启确认已过期，请重新发送 /restart。")
+            yield
+            event.stop_event()
+            return
+        if self._restart_started:
+            await self.reply(event, "AstrBot 重启任务已启动。")
+            yield
+            event.stop_event()
+            return
+
+        self._restart_started = True
+        await self.reply(event, "已确认，AstrBot 即将重启。")
+        yield
+        try:
+            if is_desktop_managed_backend():
+                schedule_desktop_restart()
+            else:
+                threading.Thread(
+                    target=restart_process, name="restart", daemon=True
+                ).start()
+        except Exception:
+            self._restart_started = False
+            self.logger.exception("Failed to start AstrBot restart task.")
+            await self.reply(event, "启动重启任务失败，请检查 AstrBot 日志。")
+            yield
+        event.stop_event()
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command(
