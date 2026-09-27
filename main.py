@@ -47,7 +47,7 @@ HELP = (
     + "\n/chatlog-pic [条目数]"
     + "\n/ctx-pic [轮数]"
     + "\n\n管理（管理员私聊）\n/term <命令>\n/restart"
-    + "\n/plugin remove <插件名>"
+    + "\n/plugin remove <插件名> [--all]"
 )
 PAGE_SIZE = 20
 CONFIRM_SECONDS = 60
@@ -101,7 +101,7 @@ class Main(Star):
         self._restart_confirmations: dict[tuple[str, str], float] = {}
         self._restart_started = False
         self._plugin_removals: dict[
-            tuple[str, str], tuple[float, str, str, object]
+            tuple[str, str], tuple[float, str, str, object, bool]
         ] = {}
 
     def get_browser_service(self):
@@ -237,7 +237,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command(
         "plugin remove",
-        desc="确认后卸载插件：plugin remove <插件名>。仅限管理员私聊。",
+        desc="确认后卸载插件：plugin remove <插件名> [--all]。仅限管理员私聊。",
     )
     async def plugin_remove(
         self, event: AstrMessageEvent, arguments: GreedyStr
@@ -255,15 +255,21 @@ class Main(Star):
 
         tokens = arguments.split()
         usage = (
-            "用法：/plugin remove <插件名>；"
-            "确认时发送 /plugin remove <插件名> confirm。"
+            "用法：/plugin remove <插件名> [--all]；"
+            "确认时发送 /plugin remove <插件名> [--all] confirm。"
         )
-        confirming = len(tokens) == 2 and tokens[1] == "confirm"
-        if not tokens or (len(tokens) != 1 and not confirming):
+        if not tokens or tokens[1:] not in (
+            [],
+            ["--all"],
+            ["confirm"],
+            ["--all", "confirm"],
+        ):
             await self.reply(event, usage)
             yield
             event.stop_event()
             return
+        delete_all = "--all" in tokens[1:]
+        confirming = tokens[-1] == "confirm" and len(tokens) > 1
 
         manager = self.context._star_manager
         if manager is None:
@@ -299,11 +305,18 @@ class Main(Star):
                 canonical_name,
                 kind,
                 identity,
+                delete_all,
             )
+            scope = (
+                "将删除插件文件、配置和数据。"
+                if delete_all
+                else "将删除插件文件，保留配置和数据。"
+            )
+            option = " --all" if delete_all else ""
             await self.reply(
                 event,
-                f"确认卸载 {canonical_name}？将删除插件文件、配置和数据。"
-                f"请在 60 秒内发送 /plugin remove {canonical_name} confirm。",
+                f"确认卸载 {canonical_name}？{scope}"
+                f"请在 60 秒内发送 /plugin remove {canonical_name}{option} confirm。",
             )
             yield
             event.stop_event()
@@ -316,6 +329,7 @@ class Main(Star):
             or canonical_name != pending[1]
             or kind != pending[2]
             or identity is not pending[3]
+            or delete_all != pending[4]
         ):
             await self.reply(event, "卸载确认已过期或插件状态已变化，请重新发送命令。")
             yield
@@ -325,7 +339,7 @@ class Main(Star):
         await self.reply(event, f"正在卸载插件 {canonical_name}。")
         yield
         try:
-            payload = {"delete_config": True, "delete_data": True}
+            payload = {"delete_config": delete_all, "delete_data": delete_all}
             if failed:
                 await service.uninstall_failed_plugin(
                     {"dir_name": canonical_name, **payload}

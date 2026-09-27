@@ -89,43 +89,69 @@ async def test_remove_shares_builtin_plugin_group_and_uses_webui_service(remove_
     assert "请在 60 秒内发送 /plugin remove demo_plugin confirm" in "".join(
         request.sent
     )
-    assert "配置" in "".join(request.sent) and "数据" in "".join(request.sent)
+    assert "保留配置和数据" in "".join(request.sent)
     uninstall.assert_not_awaited()
 
     confirmation = env.event("/plugin remove demo_plugin confirm")
     await env.scheduler.execute(confirmation)
     uninstall.assert_awaited_once_with(
-        {"name": "demo_plugin", "delete_config": True, "delete_data": True}
+        {"name": "demo_plugin", "delete_config": False, "delete_data": False}
     )
     assert "已卸载" in "".join(confirmation.sent)
     assert confirmation.is_stopped()
 
 
-async def test_remove_always_deletes_config_and_data(remove_env):
+async def test_remove_all_deletes_config_and_data(remove_env):
     env, _, _, uninstall, _ = remove_env
-    await env.invoke("plugin_remove", env.event(), "demo_plugin")
-    await env.invoke("plugin_remove", env.event(), "demo_plugin confirm")
+    request = env.event()
+    await env.invoke("plugin_remove", request, "demo_plugin --all")
+    assert "将删除插件文件、配置和数据" in "".join(request.sent)
+    assert "/plugin remove demo_plugin --all confirm" in "".join(request.sent)
+    await env.invoke("plugin_remove", env.event(), "demo_plugin --all confirm")
     uninstall.assert_awaited_once_with(
         {"name": "demo_plugin", "delete_config": True, "delete_data": True}
     )
 
 
-async def test_remove_failed_plugin_uses_webui_failed_plugin_service(remove_env):
+@pytest.mark.parametrize("option, delete_all", [("", False), (" --all", True)])
+async def test_remove_failed_plugin_uses_webui_failed_plugin_service(
+    remove_env, option, delete_all
+):
     env, current, manager, uninstall, uninstall_failed = remove_env
     current[0] = None
     manager.failed_plugin_dict["broken_directory"] = object()
 
     request = env.event()
-    await env.invoke("plugin_remove", request, "broken_directory")
-    assert "broken_directory confirm" in "".join(request.sent)
-    await env.invoke("plugin_remove", env.event(), "broken_directory confirm")
+    await env.invoke("plugin_remove", request, f"broken_directory{option}")
+    assert f"broken_directory{option} confirm" in "".join(request.sent)
+    await env.invoke(
+        "plugin_remove", env.event(), f"broken_directory{option} confirm"
+    )
     uninstall_failed.assert_awaited_once_with(
         {
             "dir_name": "broken_directory",
-            "delete_config": True,
-            "delete_data": True,
+            "delete_config": delete_all,
+            "delete_data": delete_all,
         }
     )
+    uninstall.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "initial, confirmation",
+    [
+        ("demo_plugin", "demo_plugin --all confirm"),
+        ("demo_plugin --all", "demo_plugin confirm"),
+    ],
+)
+async def test_remove_confirmation_cannot_change_delete_scope(
+    remove_env, initial, confirmation
+):
+    env, _, _, uninstall, _ = remove_env
+    await env.invoke("plugin_remove", env.event(), initial)
+    changed = env.event()
+    await env.invoke("plugin_remove", changed, confirmation)
+    assert "已过期或插件状态已变化" in "".join(changed.sent)
     uninstall.assert_not_awaited()
 
 

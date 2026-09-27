@@ -75,7 +75,7 @@ Linux 使用 Chromium 时可执行 `python -m playwright install --with-deps chr
 | `/ctx-pic [轮数]` | 当前对话逐轮上下文用量表格图片，默认 5 轮，范围 1–100 |
 | `/term <命令>` | 管理员私聊执行原生终端命令，返回命令及结果图片，长输出附文本文件 |
 | `/restart` | 管理员私聊发起重启，60 秒内发送 `/restart confirm` 后执行 |
-| `/plugin remove <插件名>` | 管理员私聊卸载插件及其配置和数据，60 秒内按提示确认 |
+| `/plugin remove <插件名> [--all]` | 管理员私聊卸载插件，默认保留配置和数据；使用 `--all` 时一并删除，60 秒内按提示确认 |
 
 目录每页 20 项，默认第一页，输出给出下一页命令。日志与会话记录的条目数为 1–100；错误参数、多余参数和未知子命令明确拒绝。
 
@@ -94,7 +94,7 @@ Linux 使用 Chromium 时可执行 `python -m playwright install --with-deps chr
 
 `/restart` 仅限管理员私聊。发送 `/restart` 后，同一管理员需在同一私聊的 60 秒内发送 `/restart confirm`；确认回复送出后开始重启。普通部署调用 AstrBot 的进程重启函数。Windows 版 AstrBot Desktop 会由独立脚本结束当前桌面应用及后端，再启动同一个桌面程序；此过程会中断正在处理的任务，失败信息写入 `data/logs/desktop_restart.log`。其他系统上的 Desktop 模式暂不支持脚本重启。重启后 AstrBot 会重新读取 `data/cmd_config.json`。
 
-`/plugin remove <插件名>` 仅限管理员私聊。首次发送后，同一管理员需在同一私聊的 60 秒内发送提示中的 `/plugin remove <插件名> confirm`。确认后删除插件文件、配置和数据，调用 WebUI 使用的卸载服务；支持已加载插件名及加载失败插件的目录名。AstrBot 保留插件不能卸载。
+`/plugin remove <插件名>` 仅限管理员私聊。首次发送后，同一管理员需在同一私聊的 60 秒内发送提示中的 `/plugin remove <插件名> confirm`。确认后只删除插件文件，保留配置和数据。使用 `/plugin remove <插件名> --all` 时，需发送 `/plugin remove <插件名> --all confirm`，确认后才会一并删除配置和数据。命令调用 WebUI 使用的卸载服务；支持已加载插件名及加载失败插件的目录名。AstrBot 保留插件不能卸载。
 
 ## 终端执行
 
