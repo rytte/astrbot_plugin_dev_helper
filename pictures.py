@@ -39,12 +39,20 @@ class PictureTable:
 
 
 @dataclass(frozen=True)
+class PictureFooter:
+    directory: str
+    details: str
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class PictureDocument:
     title: str
     summary: str
     blocks: tuple[PictureBlock, ...]
     table: PictureTable | None = None
     max_pages: int | None = None
+    footer: PictureFooter | None = None
 
 
 class PicturePages(list[bytes]):
@@ -98,6 +106,24 @@ def build_html(document: PictureDocument) -> str:
             '<col class="time-column"></colgroup>'
             f"<thead><tr>{columns}</tr></thead><tbody>{rows}</tbody></table>"
         )
+    header = ""
+    if document.title or document.summary:
+        header = (
+            f"<header><h1>{escape(redact(document.title))}</h1>"
+            f'<div class="summary">{escape(redact(document.summary))}</div></header>'
+        )
+    footer = '<span id="footer"></span>'
+    if document.footer is not None:
+        details = document.footer
+        footer = (
+            f'<div class="footer-directory">{escape(redact(details.directory))}</div>'
+            f'<div class="footer-details">{escape(redact(details.details))}'
+            ' · <span id="footer"></span></div>'
+            + "".join(
+                f'<div class="footer-warning">{escape(redact(warning))}</div>'
+                for warning in details.warnings
+            )
+        )
     return f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; font-src 'none'">
@@ -128,6 +154,10 @@ pre:empty::before {{ content: "\\00a0"; }}
 .usage-table td:first-child {{ color: #72c4cc; }}
 footer {{ margin-top: 20px; padding-top: 12px; border-top: 1px solid #414141;
   font-size: 14px; line-height: 20px; color: #888; }}
+.footer-directory, .footer-details {{ white-space: pre-wrap; overflow-wrap: anywhere; }}
+.footer-details {{ margin-top: 4px; }}
+.footer-warning {{ margin-top: 8px; font-size: 16px; line-height: 24px;
+  color: #d4b95e; font-weight: bold; white-space: pre-wrap; overflow-wrap: anywhere; }}
 {formatter.get_style_defs(".json")}
 /* VS Code dark JSON token colours. */
 .json {{ background: transparent; }}
@@ -137,9 +167,9 @@ footer {{ margin-top: 20px; padding-top: 12px; border-top: 1px solid #414141;
 .json .kc {{ color: #569cd6; }}
 .json .p {{ color: #d4d4d4; }}
 </style></head><body><main id="sheet">
-<header><h1>{escape(redact(document.title))}</h1><div class="summary">{escape(redact(document.summary))}</div></header>
+{header}
 <div id="window"><div id="content">{"".join(blocks)}</div></div>
-<footer id="footer"></footer></main></body></html>"""
+<footer>{footer}</footer></main></body></html>"""
 
 
 class LocalPictureRenderer:
@@ -171,6 +201,7 @@ class LocalPictureRenderer:
     async def _render(self, document: PictureDocument) -> list[bytes]:
         if document.max_pages is not None and document.max_pages < 1:
             raise ValueError("图片页数上限必须大于 0。")
+        page_prefix = "" if document.footer is not None else "开发助手 · "
         documents = [document]
         if document.table is not None:
             documents = [
@@ -209,7 +240,7 @@ class LocalPictureRenderer:
                         await page.evaluate("document.fonts.ready")
                     await page.locator("#footer").evaluate(
                         "(el, label) => el.textContent = label",
-                        f"开发助手 · 第 {index + 1} / {len(documents)} 页",
+                        f"{page_prefix}第 {index + 1} / {len(documents)} 页",
                     )
                     images.append(await page.locator("#sheet").screenshot(type="png"))
                 return PicturePages(images, len(documents))
@@ -228,13 +259,13 @@ class LocalPictureRenderer:
                     {
                         "offset": offset,
                         "height": min(page_height, height - offset),
-                        "label": f"开发助手 · 第 {index + 1} / {count} 页",
+                        "label": f"{page_prefix}第 {index + 1} / {count} 页",
                     },
                 )
                 if document.max_pages is not None and count > document.max_pages:
                     await page.locator("#footer").evaluate(
                         "(el, label) => el.textContent = label",
-                        f"开发助手 · 第 {index + 1} / {count} 页 · 仅展示前 {document.max_pages} 页，完整内容见文本附件",
+                        f"{page_prefix}第 {index + 1} / {count} 页 · 仅展示前 {document.max_pages} 页，完整内容见文本附件",
                     )
                 images.append(await page.locator("#sheet").screenshot(type="png"))
             return PicturePages(images, count)

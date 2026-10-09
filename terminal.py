@@ -23,7 +23,7 @@ from astrbot.core.workspace import (
 )
 
 from .display import redact
-from .pictures import PictureBlock, PictureDocument
+from .pictures import PictureBlock, PictureDocument, PictureFooter
 
 
 async def session_workspace(context, umo: str) -> Path:
@@ -56,21 +56,36 @@ class TerminalResult:
             f"当前目录：{self.next_cwd}",
             f"退出码：{self.exit_code} · 耗时：{self.elapsed:.2f} 秒",
         ]
-        if self.timeout:
-            lines.append("执行超时，进程已终止；以下是终止前收集的输出。")
-        if self.truncated:
-            lines.append("输出达到容量上限，进程已终止，结果已截断。")
+        lines.extend(self.warnings())
         return redact("\n".join(lines))
 
+    def warnings(self) -> tuple[str, ...]:
+        warnings = []
+        if self.timeout:
+            warnings.append("执行超时，进程已终止；以下是终止前收集的输出。")
+        if self.truncated:
+            warnings.append("输出达到容量上限，进程已终止，结果已截断。")
+        return tuple(warnings)
+
     def document(self, max_pages: int) -> PictureDocument:
+        shell = Path(self.shell).stem
+        if shell.lower() in {"powershell", "pwsh"}:
+            shell = "PowerShell"
         return PictureDocument(
-            "终端执行结果",
-            self.summary(),
+            "",
+            "",
             (
                 PictureBlock(redact(f"> {self.command}\n\n")),
                 PictureBlock(redact(self.output) or "（无输出）"),
             ),
             max_pages=max_pages,
+            footer=PictureFooter(
+                directory=redact(f"当前目录：{self.next_cwd}"),
+                details=redact(
+                    f"{shell} · 退出码 {self.exit_code} · 耗时 {self.elapsed:.2f} 秒"
+                ),
+                warnings=self.warnings(),
+            ),
         )
 
     def transcript(self) -> str:

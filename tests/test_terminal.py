@@ -5,14 +5,27 @@ import os
 import shlex
 import shutil
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 from astrbot.api.message_components import File, Image
-from astrbot_plugin_dev_helper.pictures import PicturePages, RenderError, build_html
-from astrbot_plugin_dev_helper.terminal import TerminalRunner, session_workspace
+from astrbot_plugin_dev_helper.pictures import (
+    WIDTH,
+    LocalPictureRenderer,
+    PictureBlock,
+    PictureDocument,
+    PicturePages,
+    RenderError,
+    build_html,
+)
+from astrbot_plugin_dev_helper.terminal import (
+    TerminalResult,
+    TerminalRunner,
+    session_workspace,
+)
 
 
 def quote(value):
@@ -24,6 +37,129 @@ def quote(value):
 def python_command(code):
     prefix = "& " if os.name == "nt" else ""
     return f"{prefix}{quote(sys.executable)} -c {quote(code)}"
+
+
+@pytest.mark.parametrize(
+    "timeout,truncated", [(False, False), (True, False), (False, True), (True, True)]
+)
+def test_terminal_picture_moves_metadata_to_footer(tmp_path, timeout, truncated):
+    result = TerminalResult(
+        command="echo '<command>' api_key=command-secret",
+        cwd=tmp_path / "execution-only",
+        next_cwd=tmp_path / "current&directory",
+        shell="powershell.EXE",
+        output="<output> password=output-secret",
+        exit_code=7,
+        elapsed=0.345,
+        timeout=timeout,
+        truncated=truncated,
+    )
+    document = result.document(max_pages=5)
+    assert document.title == document.summary == ""
+    assert document.footer.directory == f"当前目录：{result.next_cwd}"
+    assert document.footer.details == "PowerShell · 退出码 7 · 耗时 0.34 秒"
+    assert len(document.footer.warnings) == int(timeout) + int(truncated)
+    html = build_html(document)
+    assert "<header>" not in html and "<h1>" not in html
+    assert "终端执行结果" not in html and "执行目录" not in html
+    assert "execution-only" not in html
+    content, footer = html.split("<footer>", 1)
+    assert "&lt;command&gt;" in content and "&lt;output&gt;" in content
+    assert "当前目录" not in content and "退出码 7" not in content
+    assert "current&amp;directory" in footer and "退出码 7" in footer
+    assert 'id="footer"' in footer and 'class="footer-details"' in footer
+    assert footer.count('class="footer-warning"') == int(timeout) + int(truncated)
+    assert "command-secret" not in html and "output-secret" not in html
+    assert "执行目录" in result.transcript()
+    assert ("执行超时" in result.transcript()) == timeout
+    assert ("已截断" in result.transcript()) == truncated
+
+
+def test_diagnostic_picture_layout_keeps_its_header():
+    html = build_html(PictureDocument("最近日志", "日志概览", (PictureBlock("entry"),)))
+    assert "<header><h1>最近日志</h1>" in html
+    assert '<div class="summary">日志概览</div>' in html
+    assert '<footer><span id="footer"></span></footer>' in html
+    assert 'class="footer-directory"' not in html
+
+
+@pytest.mark.skipif(
+    os.environ.get("PICTURE_TESTS") != "1", reason="Requires installed browser"
+)
+async def test_terminal_browser_repeats_footer_and_keeps_diagnostic_layout(
+    tmp_path, monkeypatch
+):
+    from astrbot_plugin_browser.service import BrowserService
+
+    service = BrowserService(
+        browser_executable=os.environ.get("ASTRBOT_BROWSER_EXECUTABLE", "")
+    )
+    captured = []
+    original_session = service.session
+
+    @asynccontextmanager
+    async def inspect_session(**options):
+        async with original_session(**options) as page:
+            original_locator = page.locator
+            sheet = original_locator("#sheet")
+
+            async def screenshot(**arguments):
+                captured.append(
+                    await page.evaluate("""() => ({
+                    header: document.querySelector('header')?.innerText ?? '',
+                    footer: document.querySelector('footer').innerText,
+                    width: document.querySelector('#sheet').scrollWidth,
+                    directoryHeight: document.querySelector('.footer-directory')?.offsetHeight ?? 0
+                })""")
+                )
+                return await sheet.screenshot(**arguments)
+
+            monkeypatch.setattr(
+                page,
+                "locator",
+                lambda selector: (
+                    SimpleNamespace(screenshot=screenshot)
+                    if selector == "#sheet"
+                    else original_locator(selector)
+                ),
+            )
+            yield page
+
+    monkeypatch.setattr(service, "session", inspect_session)
+    result = TerminalResult(
+        command="echo example",
+        cwd=tmp_path / "execution-only",
+        next_cwd=tmp_path / ("中文长目录" * 60),
+        shell="powershell.EXE",
+        output="\n".join(f"line-{index}" for index in range(130)),
+        exit_code=1,
+        elapsed=1.25,
+        timeout=True,
+        truncated=True,
+    )
+    try:
+        await service.initialize()
+        renderer = LocalPictureRenderer(lambda: service)
+        images = await renderer.render(result.document(max_pages=2))
+        assert len(images) == 2 and images.total_pages == 3
+        for page_number, state in enumerate(captured, 1):
+            assert state["header"] == ""
+            assert f"当前目录：{result.next_cwd}" in state["footer"]
+            assert "PowerShell · 退出码 1 · 耗时 1.25 秒" in state["footer"]
+            assert f"第 {page_number} / 3 页" in state["footer"]
+            assert "完整内容见文本附件" in state["footer"]
+            assert "执行超时" in state["footer"] and "已截断" in state["footer"]
+            assert "execution-only" not in state["footer"]
+            assert "开发助手" not in state["footer"]
+            assert state["width"] == WIDTH and state["directoryHeight"] > 20
+        captured.clear()
+        await renderer.render(
+            PictureDocument("最近日志", "日志概览", (PictureBlock("entry"),))
+        )
+        assert captured[0]["header"] == "最近日志\n日志概览"
+        assert captured[0]["footer"] == "开发助手 · 第 1 / 1 页"
+    finally:
+        await service.close()
 
 
 @pytest.fixture
