@@ -3,4 +3,4 @@ display_name: 开发助手
 desc: 管理员开发与排障工具集，支持命令与模型工具的查询，日志、会话记录、上下文用量的查询与图片渲染，支持程序重启、插件卸载与终端执行。
 version: 0.7.0
 author: rytte
-astrbot_version: ">=4.27.4,<5"
+astrbot_version: ">=4.27,<5"
