@@ -67,7 +67,7 @@ class TerminalResult:
             warnings.append("输出达到容量上限，进程已终止，结果已截断。")
         return tuple(warnings)
 
-    def document(self, max_pages: int) -> PictureDocument:
+    def document(self, max_pages: int, *, dot_mode: bool = False) -> PictureDocument:
         shell = Path(self.shell).stem
         if shell.lower() in {"powershell", "pwsh"}:
             shell = "PowerShell"
@@ -83,6 +83,7 @@ class TerminalResult:
                 directory=redact(f"当前目录：{self.next_cwd}"),
                 details=redact(
                     f"{shell} · 退出码 {self.exit_code} · 耗时 {self.elapsed:.2f} 秒"
+                    + (" · 点号模式" if dot_mode else "")
                 ),
                 warnings=self.warnings(),
             ),

@@ -140,12 +140,13 @@ async def test_terminal_browser_repeats_footer_and_keeps_diagnostic_layout(
     try:
         await service.initialize()
         renderer = LocalPictureRenderer(lambda: service)
-        images = await renderer.render(result.document(max_pages=2))
+        images = await renderer.render(result.document(max_pages=2, dot_mode=True))
         assert len(images) == 2 and images.total_pages == 3
         for page_number, state in enumerate(captured, 1):
             assert state["header"] == ""
             assert f"当前目录：{result.next_cwd}" in state["footer"]
             assert "PowerShell · 退出码 1 · 耗时 1.25 秒" in state["footer"]
+            assert "点号模式" in state["footer"]
             assert f"第 {page_number} / 3 页" in state["footer"]
             assert "完整内容见文本附件" in state["footer"]
             assert "执行超时" in state["footer"] and "已截断" in state["footer"]

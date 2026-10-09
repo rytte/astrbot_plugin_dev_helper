@@ -21,9 +21,15 @@ from astrbot.core.agent.message import dump_messages_with_checkpoints
 from astrbot.core.desktop_runtime import is_desktop_managed_backend
 from astrbot.core.log import LogQueueHandler
 from astrbot.core.process_restart import restart_process
+from astrbot.core.star import star_handler
 from astrbot.core.star.filter.command import GreedyStr
 
-from .catalog import command_conflicts, command_entries, tool_entries
+from .catalog import (
+    command_conflicts,
+    command_entries,
+    terminal_dot_conflicts,
+    tool_entries,
+)
 from .context_usage import ContextUsage, format_round, history_hashes, usage_picture
 from .desktop_restart import schedule_desktop_restart
 from .display import history_text, positive_number, redact
@@ -34,6 +40,7 @@ DEV_USAGE = "/dev commands [页码]\n/dev tools [页码]\n/dev plugin <插件标
 LOG_USAGE = "/logs [条目数] [--text]\n/logs warning [条目数] [--text]"
 CHATLOG_USAGE = "/chatlog [条目数] [--text]"
 CTX_USAGE = "/ctx [轮数] [--text]"
+TERM_USAGE = "/term <命令>\n/term enter 开启点号模式\n/term exit 关闭点号模式"
 HELP = (
     "\n查询\n"
     + DEV_USAGE
@@ -44,11 +51,14 @@ HELP = (
     + "\n"
     + CTX_USAGE
     + "\n默认输出图片，渲染不可用时回退文本；--text 强制文本，须放在参数末尾。"
-    + "\n\n管理（管理员私聊）\n/term <命令>\n/restart"
+    + "\n\n管理（管理员私聊）\n"
+    + TERM_USAGE
+    + "\n点号模式下 .ls 等同于 /term ls；10 分钟无终端操作自动退出。\n/restart"
     + "\n/plugin remove <插件名> [--all]"
 )
 PAGE_SIZE = 20
 CONFIRM_SECONDS = 60
+TERMINAL_DOT_SECONDS = 10 * 60
 
 
 def output_arguments(arguments: str) -> tuple[list[str], bool]:
@@ -64,6 +74,13 @@ def output_arguments(arguments: str) -> tuple[list[str], bool]:
         if argument.startswith("--"):
             raise ValueError(f"未知选项：{argument}。")
     return args, text_only
+
+
+class TerminalDotFilter(filter.CustomFilter):
+    def filter(self, event: AstrMessageEvent, cfg: AstrBotConfig) -> bool:
+        metadata = star_handler.star_map.get(__name__)
+        plugin = metadata.star_cls if metadata and metadata.activated else None
+        return plugin is not None and plugin.matches_terminal_dot(event)
 
 
 class Main(Star):
@@ -111,6 +128,7 @@ class Main(Star):
         self.picture_renderer = LocalPictureRenderer(self.get_browser_service)
         self.context_usage = ContextUsage(self)
         self.ready = False
+        self._terminal_dot_modes: dict[tuple[str, str], float] = {}
         self._restart_confirmations: dict[tuple[str, str], float] = {}
         self._restart_started = False
         self._plugin_removals: dict[
@@ -367,12 +385,63 @@ class Main(Star):
         yield
         event.stop_event()
 
+    def terminal_dot_mode_active(self, event: AstrMessageEvent) -> bool:
+        now = time.monotonic()
+        expired = [
+            key for key, deadline in self._terminal_dot_modes.items() if deadline <= now
+        ]
+        for key in expired:
+            del self._terminal_dot_modes[key]
+        key = (event.unified_msg_origin, event.get_sender_id())
+        if key not in self._terminal_dot_modes:
+            return False
+        if terminal_dot_conflicts(
+            self.__class__.__module__,
+            self.context.get_config(event.unified_msg_origin)["wake_prefix"],
+        ):
+            del self._terminal_dot_modes[key]
+            return False
+        return True
+
+    def matches_terminal_dot(self, event: AstrMessageEvent) -> bool:
+        if (
+            not self.ready
+            or not event.is_admin()
+            or event.get_extra("_api_key_allow_admin_role") is False
+            or not event.is_private_chat()
+            or not event.message_obj.message_str.strip().startswith(".")
+            or not event.get_message_str().startswith(".")
+            or not self.terminal_dot_mode_active(event)
+        ):
+            return False
+        return True
+
+    @filter.custom_filter(TerminalDotFilter)
+    async def term_dot(self, event: AstrMessageEvent) -> AsyncIterator[None]:
+        if not self.matches_terminal_dot(event):
+            return
+        async for result in self._term(
+            event, event.get_message_str()[1:].strip(), dot=True
+        ):
+            yield result
+
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command(
-        "term", desc="执行系统终端命令并返回图片：term <命令>。仅限管理员私聊。"
+        "term",
+        desc="执行终端命令并返回图片；enter/exit 开关点号模式。仅限管理员私聊。",
     )
     async def term(
         self, event: AstrMessageEvent, arguments: GreedyStr
+    ) -> AsyncIterator[None]:
+        raw = event.get_message_str()
+        command = arguments.strip()
+        if raw == "term" or (raw.startswith("term") and raw[4:5].isspace()):
+            command = raw[4:].strip()
+        async for result in self._term(event, command):
+            yield result
+
+    async def _term(
+        self, event: AstrMessageEvent, command: str, *, dot: bool = False
     ) -> AsyncIterator[None]:
         if not await self.authorize(event):
             yield
@@ -383,13 +452,40 @@ class Main(Star):
             yield
             event.stop_event()
             return
-        # AstrBot's GreedyStr normalizes whitespace; preserve the original shell text.
-        raw = event.get_message_str()
-        command = arguments.strip()
-        if raw == "term" or (raw.startswith("term") and raw[4:5].isspace()):
-            command = raw[4:].strip()
+        key = (event.unified_msg_origin, event.get_sender_id())
+        if not dot and command == "enter":
+            conflicts = terminal_dot_conflicts(
+                self.__class__.__module__,
+                self.context.get_config(event.unified_msg_origin)["wake_prefix"],
+            )
+            if conflicts:
+                self._terminal_dot_modes.pop(key, None)
+                await self.reply(
+                    event, "无法开启点号模式，前缀冲突：" + "、".join(conflicts)
+                )
+            else:
+                if not self.terminal_dot_mode_active(event):
+                    self._terminal_dot_modes[key] = (
+                        time.monotonic() + TERMINAL_DOT_SECONDS
+                    )
+                await self.reply(
+                    event,
+                    "点号模式已开启：.ls → /term ls。\n"
+                    "10 分钟无终端操作自动退出；/term exit 手动退出。",
+                )
+            yield
+            event.stop_event()
+            return
+        if not dot and command == "exit":
+            self._terminal_dot_modes.pop(key, None)
+            await self.reply(event, "点号模式已关闭，仍可使用 /term <命令>。")
+            yield
+            event.stop_event()
+            return
         if not command or "\x00" in command:
-            await self.reply(event, "用法：/term <命令>。命令不能包含 NUL 字符。")
+            await self.reply(
+                event, "用法：\n" + TERM_USAGE + "\n命令不能包含 NUL 字符。"
+            )
             yield
             event.stop_event()
             return
@@ -398,9 +494,9 @@ class Main(Star):
             # Check rendering availability before running a potentially mutating command.
             self.get_browser_service()
             root = await session_workspace(self.context, event.unified_msg_origin)
-            result = await self.terminal.execute(
-                (event.unified_msg_origin, event.get_sender_id()), root, command
-            )
+            if self.terminal_dot_mode_active(event):
+                self._terminal_dot_modes[key] = time.monotonic() + TERMINAL_DOT_SECONDS
+            result = await self.terminal.execute(key, root, command)
         except RenderError as error:
             await self.reply(event, str(error))
             yield
@@ -416,7 +512,11 @@ class Main(Star):
             return
         attachment = False
         try:
-            document = await asyncio.to_thread(result.document, self.terminal_max_pages)
+            document = await asyncio.to_thread(
+                result.document,
+                self.terminal_max_pages,
+                dot_mode=self.terminal_dot_mode_active(event),
+            )
             images = await self.picture_renderer.render(document)
         except RenderError as error:
             await self.reply(event, f"命令已执行。{error}\n执行结果将以文本附件发送。")
@@ -921,4 +1021,5 @@ class Main(Star):
     async def terminate(self) -> None:
         """Mark diagnostics unavailable while AstrBot unloads the plugin."""
         self.ready = False
+        self._terminal_dot_modes.clear()
         await self.terminal.close()

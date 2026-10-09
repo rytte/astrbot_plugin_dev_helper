@@ -207,6 +207,25 @@ def tool_entries(manager) -> list[Entry]:
     return sorted(entries, key=lambda item: (item.source, item.plugin, item.name))
 
 
+def terminal_dot_conflicts(module: str, wake_prefixes: list[str]) -> list[str]:
+    conflicts = {
+        f"唤醒前缀 {prefix!r}" for prefix in wake_prefixes if prefix.startswith(".")
+    }
+    for handler in star_handlers_registry.get_handlers_by_event_type(
+        EventType.AdapterMessageEvent
+    ):
+        if handler.handler_module_path == module:
+            continue
+        for command_filter in handler.event_filters:
+            if isinstance(command_filter, CommandFilter | CommandGroupFilter):
+                conflicts.update(
+                    f"{name}（{handler.handler_module_path}）"
+                    for name in command_filter.get_complete_command_names()
+                    if name.startswith(".")
+                )
+    return sorted(conflicts)
+
+
 def command_conflicts(module: str) -> list[str]:
     """Find commands that can consume the same input, including aliases.
 
