@@ -30,27 +30,40 @@ from .display import history_text, positive_number, redact
 from .pictures import LocalPictureRenderer, PictureBlock, PictureDocument, RenderError
 from .terminal import TerminalRunner, session_workspace
 
-INSPECT_USAGE = (
-    "/inspect commands [页码]\n/inspect tools [页码]\n/inspect plugin <插件标识> [页码]"
-)
-LOG_USAGE = "/logs [条目数]\n/logs warning [条目数]"
-LOG_PIC_USAGE = "/logs-pic [条目数]\n/logs-pic warning [条目数]"
+DEV_USAGE = "/dev commands [页码]\n/dev tools [页码]\n/dev plugin <插件标识> [页码]"
+LOG_USAGE = "/logs [条目数] [--text]\n/logs warning [条目数] [--text]"
+CHATLOG_USAGE = "/chatlog [条目数] [--text]"
+CTX_USAGE = "/ctx [轮数] [--text]"
 HELP = (
     "\n查询\n"
-    + INSPECT_USAGE
+    + DEV_USAGE
     + "\n\n日志与对话\n"
     + LOG_USAGE
-    + "\n/chatlog [条目数]"
-    + "\n/ctx [轮数]"
-    + "\n\n图片输出\n"
-    + LOG_PIC_USAGE
-    + "\n/chatlog-pic [条目数]"
-    + "\n/ctx-pic [轮数]"
+    + "\n"
+    + CHATLOG_USAGE
+    + "\n"
+    + CTX_USAGE
+    + "\n默认输出图片，渲染不可用时回退文本；--text 强制文本，须放在参数末尾。"
     + "\n\n管理（管理员私聊）\n/term <命令>\n/restart"
     + "\n/plugin remove <插件名> [--all]"
 )
 PAGE_SIZE = 20
 CONFIRM_SECONDS = 60
+
+
+def output_arguments(arguments: str) -> tuple[list[str], bool]:
+    args = arguments.split()
+    if args.count("--text") > 1:
+        raise ValueError("参数 --text 不能重复。")
+    text_only = bool(args and args[-1] == "--text")
+    if "--text" in args and not text_only:
+        raise ValueError("参数 --text 必须放在末尾。")
+    if text_only:
+        args.pop()
+    for argument in args:
+        if argument.startswith("--"):
+            raise ValueError(f"未知选项：{argument}。")
+    return args, text_only
 
 
 class Main(Star):
@@ -438,15 +451,22 @@ class Main(Star):
                 yield
         event.stop_event()
 
-    async def reply_pictures(
-        self, event: AstrMessageEvent, document: PictureDocument
+    async def reply_diagnostic(
+        self, event: AstrMessageEvent, text: str, document: PictureDocument | None
     ) -> AsyncIterator[None]:
-        """Render all pages locally, then yield each image for standard delivery."""
+        """Render all pages before delivery or submit the same query as plain text."""
         event.should_call_llm(False)
+        if document is None:
+            await self.reply(event, text)
+            yield
+            return
         try:
             images = await self.picture_renderer.render(document)
         except RenderError as error:
-            await self.reply(event, str(error))
+            self.logger.warning(
+                "Diagnostic image rendering failed; using text: %s", redact(str(error))
+            )
+            await self.reply(event, "图片渲染不可用，已改为文本。\n\n" + text)
             yield
             return
         for image in images:
@@ -461,18 +481,18 @@ class Main(Star):
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command(
-        "inspect",
+        "dev",
         desc="查看开发助手帮助、命令与模型工具；支持 commands、tools、plugin 子命令。",
     )
-    async def inspect(
+    async def dev(
         self, event: AstrMessageEvent, arguments: GreedyStr
     ) -> AsyncIterator[None]:
         """Let AstrBot deliver the result before stopping further handlers."""
-        await self._inspect(event, arguments)
+        await self._dev(event, arguments)
         yield
         event.stop_event()
 
-    async def _inspect(self, event: AstrMessageEvent, arguments: str) -> None:
+    async def _dev(self, event: AstrMessageEvent, arguments: str) -> None:
         """Read catalogs using optional positional page numbers."""
         if not await self.authorize(event):
             return
@@ -495,7 +515,7 @@ class Main(Star):
                     else tool_entries(self.context.get_llm_tool_manager())
                 )
                 title = "命令目录" if args[0] == "commands" else "模型工具目录"
-                next_command = f"/inspect {args[0]}"
+                next_command = f"/dev {args[0]}"
             elif args[0] == "plugin" and 2 <= len(args) <= 3:
                 page = positive_number(args[2] if len(args) == 3 else "", 1)
                 matches = [
@@ -519,7 +539,7 @@ class Main(Star):
                 title = (
                     f"插件：{plugin.name}（{'启用' if plugin.activated else '停用'}）"
                 )
-                next_command = f"/inspect plugin {args[1]}"
+                next_command = f"/dev plugin {args[1]}"
                 if not entries:
                     message = (
                         "当前没有已注册的命令或工具。"
@@ -529,7 +549,7 @@ class Main(Star):
                     await self.reply(event, title + "\n" + message)
                     return
             else:
-                raise ValueError("用法：\n" + INSPECT_USAGE)
+                raise ValueError("用法：\n" + DEV_USAGE)
             pages = max(1, (len(entries) + PAGE_SIZE - 1) // PAGE_SIZE)
             if page > pages:
                 raise ValueError(f"页码超出范围，共 {pages} 页。")
@@ -553,46 +573,32 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command(
         "logs",
-        desc="查看最近日志：logs [条目数] 或 logs warning [条目数]。仅限管理员私聊。",
+        desc="最近日志默认输出图片：logs [条目数] [--text] 或 logs warning [条目数] [--text]。仅限管理员私聊。",
     )
     async def logs(
         self, event: AstrMessageEvent, arguments: GreedyStr
     ) -> AsyncIterator[None]:
-        """Let AstrBot deliver the result before stopping further handlers."""
-        await self._logs(event, arguments)
-        yield
-        event.stop_event()
-
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command(
-        "logs-pic",
-        desc="日志等级配色图片：logs-pic [条目数] 或 logs-pic warning [条目数]。仅限管理员私聊。",
-    )
-    async def logs_pic(
-        self, event: AstrMessageEvent, arguments: GreedyStr
-    ) -> AsyncIterator[None]:
-        document = await self._logs(event, arguments, picture=True)
-        if document is None:
+        result = await self._logs(event, arguments)
+        if result is None:
             yield
         else:
-            async for _ in self.reply_pictures(event, document):
+            async for _ in self.reply_diagnostic(event, *result):
                 yield
         event.stop_event()
 
     async def _logs(
-        self, event: AstrMessageEvent, arguments: str, picture: bool = False
-    ) -> PictureDocument | None:
+        self, event: AstrMessageEvent, arguments: str
+    ) -> tuple[str, PictureDocument | None] | None:
         """Read the existing log cache, filtering levels before taking the tail."""
         if not await self.authorize(event, private=True):
             return
-        args = arguments.split()
-        usage = LOG_PIC_USAGE if picture else LOG_USAGE
         try:
+            args, text_only = output_arguments(arguments)
             warning_only = bool(args and args[0] == "warning")
             if warning_only:
                 args = args[1:]
             if len(args) > 1:
-                raise ValueError("用法：\n" + usage)
+                raise ValueError("参数过多。")
             count = positive_number(
                 args[0] if args else "", self.logs_default_count, 100
             )
@@ -624,24 +630,27 @@ class Main(Star):
                 "级别：WARNING 及以上" if warning_only else "级别：全部",
                 "",
             ]
-            if picture:
-                return PictureDocument(
+            selected_text = [
+                redact(record["data"].rstrip("\r\n")) for record in selected
+            ]
+            document = None
+            if not text_only:
+                document = PictureDocument(
                     title="最近日志",
                     summary=redact("\n".join(lines[:2])),
                     blocks=tuple(
                         PictureBlock(
-                            redact(record["data"].rstrip("\r\n")),
+                            text,
                             "log",
                             record["level"],
                         )
-                        for record in selected
+                        for record, text in zip(selected, selected_text)
                     ),
                 )
-            for record in selected:
-                lines.append(redact(record["data"].rstrip("\r\n")))
-            await self.reply(event, "\n".join(lines))
+            lines.extend(selected_text)
+            return "\n".join(lines), document
         except ValueError as error:
-            await self.reply(event, f"{error}\n用法：\n{usage}")
+            await self.reply(event, f"{error}\n用法：\n{LOG_USAGE}")
         except Exception:
             self.logger.exception("Failed to read the AstrBot log cache.")
             await self.reply(event, "日志源数据读取失败，请检查 AstrBot 日志服务。")
@@ -649,48 +658,34 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command(
         "chatlog",
-        desc="查看当前会话最近的已保存记录：chatlog [条目数]。省略条目数时使用插件配置。",
+        desc="当前会话记录默认输出 JSON 高亮图片：chatlog [条目数] [--text]。省略条目数时使用插件配置。",
     )
     async def chatlog(
         self, event: AstrMessageEvent, arguments: GreedyStr
     ) -> AsyncIterator[None]:
-        """Let AstrBot deliver the result before stopping further handlers."""
-        await self._chatlog(event, arguments)
-        yield
-        event.stop_event()
-
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command(
-        "chatlog-pic",
-        desc="当前会话 JSON 高亮图片：chatlog-pic [条目数]。省略条目数时使用插件配置。",
-    )
-    async def chatlog_pic(
-        self, event: AstrMessageEvent, arguments: GreedyStr
-    ) -> AsyncIterator[None]:
-        document = await self._chatlog(event, arguments, picture=True)
-        if document is None:
+        result = await self._chatlog(event, arguments)
+        if result is None:
             yield
         else:
-            async for _ in self.reply_pictures(event, document):
+            async for _ in self.reply_diagnostic(event, *result):
                 yield
         event.stop_event()
 
     async def _chatlog(
-        self, event: AstrMessageEvent, arguments: str, picture: bool = False
-    ) -> PictureDocument | None:
+        self, event: AstrMessageEvent, arguments: str
+    ) -> tuple[str, PictureDocument | None] | None:
         """Read the current saved history without creating or changing a session."""
         if not await self.authorize(event):
             return
         try:
-            args = arguments.split()
+            args, text_only = output_arguments(arguments)
             if len(args) > 1:
-                command = "chatlog-pic" if picture else "chatlog"
-                raise ValueError(f"用法：/{command} [条目数]")
+                raise ValueError("参数过多。")
             count = positive_number(
                 args[0] if args else "", self.chatlog_default_count, 100
             )
         except ValueError as error:
-            await self.reply(event, str(error))
+            await self.reply(event, f"{error}\n用法：{CHATLOG_USAGE}")
             return
         try:
             origin = event.unified_msg_origin
@@ -726,8 +721,10 @@ class Main(Star):
             lines = [
                 f"当前会话记录\n会话：{origin}\n对话：{cid}\n共 {len(records)} 条，显示最近 {len(selected)} 条（按消息计数）"
             ]
-            if picture:
-                return PictureDocument(
+            selected_text = [history_text(record) for record in selected]
+            document = None
+            if not text_only:
+                document = PictureDocument(
                     title="当前会话记录 · JSON",
                     summary=redact(
                         f"会话：{origin}\n对话：{cid}\n共 {len(records)} 条，显示第 "
@@ -737,10 +734,7 @@ class Main(Star):
                     blocks=(
                         PictureBlock(
                             json.dumps(
-                                [
-                                    json.loads(history_text(record))
-                                    for record in selected
-                                ],
+                                [json.loads(text) for text in selected_text],
                                 ensure_ascii=False,
                                 indent=2,
                             ),
@@ -748,12 +742,14 @@ class Main(Star):
                         ),
                     ),
                 )
-            for index, record in enumerate(selected, len(records) - len(selected) + 1):
-                lines.append(f"#{index} {record['role']}\n{history_text(record)}")
+            for index, (record, text) in enumerate(
+                zip(selected, selected_text), len(records) - len(selected) + 1
+            ):
+                lines.append(f"#{index} {record['role']}\n{text}")
             lines.append(
                 "以上为已保存的会话记录，可能不含尚未落库的消息及动态系统提示词。"
             )
-            await self.reply(event, "\n\n".join(lines))
+            return "\n\n".join(lines), document
         except (ValueError, TypeError):
             self.logger.exception("Stored conversation history is malformed.")
             await self.reply(event, "当前对话记录数据格式错误，无法读取。")
@@ -855,41 +851,31 @@ class Main(Star):
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command(
-        "ctx", desc="查看当前对话最近几轮的上下文用量：ctx [轮数]，默认 5 轮。"
+        "ctx", desc="上下文用量默认输出表格图片：ctx [轮数] [--text]，默认 5 轮。"
     )
     async def ctx(
         self, event: AstrMessageEvent, arguments: GreedyStr
     ) -> AsyncIterator[None]:
-        await self._ctx(event, arguments)
-        yield
-        event.stop_event()
-
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("ctx-pic", desc="上下文用量图片：ctx-pic [轮数]，默认 5 轮。")
-    async def ctx_pic(
-        self, event: AstrMessageEvent, arguments: GreedyStr
-    ) -> AsyncIterator[None]:
-        document = await self._ctx(event, arguments, picture=True)
-        if document is not None:
-            async for _ in self.reply_pictures(event, document):
-                yield
-        else:
+        result = await self._ctx(event, arguments)
+        if result is None:
             yield
+        else:
+            async for _ in self.reply_diagnostic(event, *result):
+                yield
         event.stop_event()
 
     async def _ctx(
-        self, event: AstrMessageEvent, arguments: str, picture: bool = False
-    ) -> PictureDocument | None:
+        self, event: AstrMessageEvent, arguments: str
+    ) -> tuple[str, PictureDocument | None] | None:
         if not await self.authorize(event):
             return
-        usage = "用法：/ctx-pic [轮数]" if picture else "用法：/ctx [轮数]"
         try:
-            args = arguments.split()
+            args, text_only = output_arguments(arguments)
             if len(args) > 1:
-                raise ValueError(usage)
+                raise ValueError("参数过多。")
             count = positive_number(args[0] if args else "", 5, 100)
         except ValueError as error:
-            await self.reply(event, f"{error}\n{usage}")
+            await self.reply(event, f"{error}\n用法：{CTX_USAGE}")
             return
         try:
             cid, conversation, history = await self._usage_conversation(event)
@@ -910,21 +896,22 @@ class Main(Star):
                 )
                 return
             lines = ["上下文用量（tokens）"]
+            document = None
             if records:
                 selected = records[-count:]
-                if picture:
-                    return usage_picture(selected)
+                if not text_only:
+                    document = usage_picture(selected)
                 lines[0] += f"｜最近 {len(selected)} 轮"
                 lines.extend(format_round(record) for record in selected)
             else:
                 total = conversation.token_usage
                 if type(total) is int and total > 0:
-                    if picture:
-                        return usage_picture([], total)
+                    if not text_only:
+                        document = usage_picture([], total)
                     lines.append(f"最近一次合计：{total:,}（无明细）")
                 else:
                     lines.append("暂无用量记录。")
-            await self.reply(event, "\n\n".join(lines))
+            return "\n\n".join(lines), document
         except ValueError as error:
             await self.reply(event, str(error))
         except Exception:

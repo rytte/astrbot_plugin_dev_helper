@@ -5,7 +5,7 @@ import base64
 import copy
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from astrbot.api.message_components import Image
@@ -24,6 +24,7 @@ from astrbot_plugin_dev_helper.context_usage import (
     extract_usage,
     usage_picture,
 )
+from astrbot_plugin_dev_helper.pictures import RenderError
 
 
 @pytest.mark.parametrize(
@@ -234,7 +235,7 @@ async def test_recent_rounds_real_hooks_history_and_no_cumulative_tool_usage(usa
     env = usage_env
     for index in range(1, 8):
         await env.turn(index, tools=True, duplicate=True)
-    event = env.event("/ctx", admin=False)
+    event = env.event("/ctx --text", admin=False)
     await env.scheduler.execute(event)
     text = "".join(event.sent)
     assert "最近 5 轮" in text and "第 2 轮" not in text and "第 3 轮" in text
@@ -255,7 +256,7 @@ async def test_recent_rounds_real_hooks_history_and_no_cumulative_tool_usage(usa
     )
     env.plugin.context_usage = ContextUsage(env.plugin)
     event = env.event()
-    await env.invoke("ctx", event, "2")
+    await env.invoke("ctx", event, "2 --text")
     assert "最近 2 轮" in "".join(event.sent)
     assert "第 5 轮" not in "".join(event.sent)
 
@@ -265,7 +266,7 @@ async def test_unknown_round_does_not_reuse_previous_usage(usage_env):
     await env.turn(1)
     await env.turn(2, unknown=True)
     event = env.event()
-    await env.invoke("ctx", event, "1")
+    await env.invoke("ctx", event, "1 --text")
     text = "".join(event.sent)
     assert "第 2 轮" in text and "未提供用量" in text
     assert "输入：" not in text and "合计：" not in text
@@ -275,7 +276,7 @@ async def test_unsaved_response_is_not_shown_and_deleted(usage_env):
     env = usage_env
     await env.turn(1, persist=False)
     event = env.event()
-    await env.invoke("ctx", event, "")
+    await env.invoke("ctx", event, "--text")
     assert "上下文为空" in "".join(event.sent)
     assert not env.usage_storage
 
@@ -305,7 +306,7 @@ async def test_actual_reset_clears_and_rejects_late_completion(usage_env, monkey
     assert not env.usage_storage
     await env.turn(2)
     event = env.event()
-    await env.invoke("ctx", event, "")
+    await env.invoke("ctx", event, "--text")
     text = "".join(event.sent)
     assert "第 1 轮" in text and "输入：220" in text and "输入：110" not in text
 
@@ -333,7 +334,7 @@ async def test_webui_clear_and_compression_prune_by_actual_history(usage_env):
         await env.turn(index)
     env.conversation.history = json.dumps(json.loads(env.conversation.history)[-2:])
     event = env.event()
-    await env.invoke("ctx", event, "")
+    await env.invoke("ctx", event, "--text")
     text = "".join(event.sent)
     assert "第 3 轮" in text and "第 2 轮" not in text
     assert len(next(iter(env.usage_storage.values()))["records"]) == 1
@@ -341,7 +342,7 @@ async def test_webui_clear_and_compression_prune_by_actual_history(usage_env):
     env.plugin.context_usage = ContextUsage(env.plugin)
     await env.turn(4)
     event = env.event()
-    await env.invoke("ctx", event, "")
+    await env.invoke("ctx", event, "--text")
     assert "第 1 轮" in "".join(event.sent) and "第 3 轮" not in "".join(event.sent)
 
 
@@ -353,17 +354,17 @@ async def test_different_conversation_and_wrong_owner_cannot_share_usage(usage_e
     env.conversation.history = "[]"
     env.context.conversation_manager.get_curr_conversation_id.return_value = "other-cid"
     event = env.event()
-    await env.invoke("ctx", event, "")
+    await env.invoke("ctx", event, "--text")
     assert "上下文为空" in "".join(event.sent)
     env.conversation.cid = "cid"
     env.conversation.history = original
     env.context.conversation_manager.get_curr_conversation_id.return_value = "cid"
     event = env.event()
-    await env.invoke("ctx", event, "")
+    await env.invoke("ctx", event, "--text")
     assert "输入：110" in "".join(event.sent)
     env.conversation.user_id = "wrong-session"
     event = env.event()
-    await env.invoke("ctx", event, "")
+    await env.invoke("ctx", event, "--text")
     assert "归属" in "".join(event.sent) and "输入：110" not in "".join(event.sent)
 
 
@@ -372,7 +373,7 @@ async def test_existing_conversation_only_reports_known_total(usage_env):
     env.conversation.history = '[{"role":"user","content":"old"}]'
     env.conversation.token_usage = 456
     event = env.event()
-    await env.invoke("ctx", event, "")
+    await env.invoke("ctx", event, "--text")
     text = "".join(event.sent)
     assert "最近一次合计：456（无明细）" in text
     assert "第 1 轮" not in text
@@ -388,7 +389,7 @@ async def test_query_during_first_request_does_not_invalidate_recording(usage_en
     )
     ticket = event.get_extra("dev_helper_context_ticket")
     query = env.event()
-    await env.invoke("ctx", query, "")
+    await env.invoke("ctx", query, "--text")
     assert env.usage_storage[ticket["key"]]["generation"] == ticket["generation"]
     await env.plugin.context_usage.finish(
         ticket,
@@ -407,7 +408,7 @@ async def test_ctx_picture_uses_same_recent_rounds_and_sends_pages(
         await env.turn(index)
     pages = [b"page-one", b"page-two"]
     env.plugin.picture_renderer.render = AsyncMock(return_value=pages)
-    event = env.event(f"/ctx-pic {arguments}", admin=False)
+    event = env.event(f"/ctx {arguments}", admin=False)
     await env.scheduler.execute(event)
     document = env.plugin.picture_renderer.render.call_args.args[0]
     assert document.title == "上下文用量"
@@ -435,9 +436,9 @@ async def test_ctx_picture_uses_same_recent_rounds_and_sends_pages(
 @pytest.mark.parametrize("arguments", ["0", "101", "2 extra", "bad"])
 async def test_ctx_picture_invalid_arguments_do_not_query_or_render(env, arguments):
     env.plugin.picture_renderer.render = AsyncMock()
-    event = env.event(f"/ctx-pic {arguments}", admin=False)
+    event = env.event(f"/ctx {arguments}", admin=False)
     await env.scheduler.execute(event)
-    assert "/ctx-pic [轮数]" in "".join(event.sent)
+    assert "/ctx [轮数] [--text]" in "".join(event.sent)
     env.context.conversation_manager.get_curr_conversation_id.assert_not_awaited()
     env.plugin.picture_renderer.render.assert_not_awaited()
 
@@ -446,13 +447,13 @@ async def test_ctx_picture_empty_and_wrong_owner_remain_text(usage_env):
     env = usage_env
     env.plugin.picture_renderer.render = AsyncMock()
     event = env.event()
-    await env.invoke("ctx_pic", event, "")
+    await env.invoke("ctx", event, "")
     assert "上下文为空" in "".join(event.sent)
     env.plugin.picture_renderer.render.assert_not_awaited()
     await env.turn(1)
     env.conversation.user_id = "someone-else"
     event = env.event()
-    await env.invoke("ctx_pic", event, "")
+    await env.invoke("ctx", event, "")
     assert "归属" in "".join(event.sent)
     env.plugin.picture_renderer.render.assert_not_awaited()
 
@@ -463,7 +464,7 @@ async def test_ctx_picture_can_show_existing_total_without_invented_round(usage_
     env.conversation.token_usage = 456
     env.plugin.picture_renderer.render = AsyncMock(return_value=[b"png"])
     event = env.event()
-    await env.invoke("ctx_pic", event, "")
+    await env.invoke("ctx", event, "")
     document = env.plugin.picture_renderer.render.call_args.args[0]
     assert "无明细" in document.summary
     assert document.table.columns == ("轮次", "时间", "合计")
@@ -484,3 +485,44 @@ def test_ctx_table_distinguishes_missing_values_and_explicit_zero():
     unknown = usage_picture(records[-1:])
     assert unknown.table.columns == ("轮次", "时间", "用量")
     assert unknown.table.rows[0][2] == "未提供用量"
+
+
+async def test_ctx_text_option_skips_rendering_and_browser_checks(usage_env):
+    env = usage_env
+    for index in range(1, 4):
+        await env.turn(index)
+    env.plugin.picture_renderer.render = AsyncMock(
+        side_effect=AssertionError("Unexpected render")
+    )
+    env.context.get_registered_star = Mock(
+        side_effect=AssertionError("Unexpected browser service check")
+    )
+    event = env.event("/ctx 2 --text", admin=False)
+    await env.scheduler.execute(event)
+    text = "".join(event.sent)
+    assert "最近 2 轮" in text and "第 2 轮" in text and "第 3 轮" in text
+    assert "第 1 轮" not in text and "已改为文本" not in text
+    env.plugin.picture_renderer.render.assert_not_awaited()
+    env.context.get_registered_star.assert_not_called()
+    assert event.send.await_count == 1 and not env.model_calls
+
+
+async def test_ctx_render_failure_uses_one_usage_snapshot(usage_env):
+    env = usage_env
+    await env.turn(1)
+    manager = env.context.conversation_manager
+    manager.get_curr_conversation_id.reset_mock()
+    manager.get_conversation.reset_mock()
+    env.plugin.context_usage.sync = AsyncMock(wraps=env.plugin.context_usage.sync)
+    env.plugin.picture_renderer.render = AsyncMock(
+        side_effect=RenderError("浏览器服务不可用")
+    )
+    event = env.event("/ctx", admin=False)
+    await env.scheduler.execute(event)
+    text = "".join(event.sent)
+    assert "已改为文本" in text and "第 1 轮" in text and "输入：110" in text
+    env.plugin.context_usage.sync.assert_awaited_once()
+    manager.get_curr_conversation_id.assert_awaited_once()
+    manager.get_conversation.assert_awaited_once()
+    env.plugin.picture_renderer.render.assert_awaited_once()
+    assert event.send.await_count == 1 and not env.model_calls

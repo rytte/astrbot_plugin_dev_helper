@@ -48,7 +48,7 @@ async def test_decorator_registered_agent_and_child_appear_in_plugin_details(
     assert set(owned) == {"transfer_to_helper", "agent_lookup"}
     assert "transfer_to_helper" in owned["agent_lookup"].details
     assert "query" in owned["agent_lookup"].details
-    event = env.event("/inspect plugin agent_plugin", admin=False)
+    event = env.event("/dev plugin agent_plugin", admin=False)
     await env.scheduler.execute(event)
     text = "".join(event.sent)
     assert "agent_lookup" in text and "transfer_to_helper" in text

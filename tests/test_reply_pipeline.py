@@ -12,7 +12,9 @@ from astrbot.core.star.star import StarMetadata
 from astrbot.core.star.star_handler import EventType, StarHandlerMetadata
 
 
-@pytest.mark.parametrize("command", ["/inspect tools", "/logs 1", "/chatlog 1"])
+@pytest.mark.parametrize(
+    "command", ["/dev tools", "/logs 1 --text", "/chatlog 1 --text"]
+)
 @pytest.mark.parametrize(
     "platform_name,threshold,forwarded",
     [("aiocqhttp", 1500, True), ("aiocqhttp", 40000, False), ("telegram", 1500, False)],
@@ -50,7 +52,7 @@ async def test_long_replies_follow_core_forward_settings(
     text = "".join(event.sent)
     assert len(text) > 14000
     assert "visible" in text and "reply-secret" not in text
-    if command == "/inspect tools":
+    if command == "/dev tools":
         assert all(f"tool_{i}" in text for i in range(12))
         assert text.count("visible " * 250) == 12
     else:
@@ -77,7 +79,7 @@ async def test_response_is_sent_before_stopping_later_handlers(env):
         )
     )
     env.owners["observer.main"] = StarMetadata(name="observer", activated=True)
-    event = env.event("/inspect", admin=False)
+    event = env.event("/dev", admin=False)
 
     await env.scheduler.execute(event)
 

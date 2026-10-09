@@ -5,7 +5,7 @@ import io
 import json
 import os
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from astrbot.api.message_components import Image
@@ -38,15 +38,16 @@ def png_bytes(color):
 @pytest.mark.parametrize(
     "command,count,warning",
     [
-        ("/logs-pic", 30, False),
-        ("/logs-pic warning", 30, True),
-        ("/logs-pic warning 2", 2, True),
-        ("/chatlog-pic", 10, False),
-        ("/chatlog-pic 2", 2, False),
+        ("/logs", 30, False),
+        ("/logs warning", 30, True),
+        ("/logs warning 2", 2, True),
+        ("/chatlog", 10, False),
+        ("/chatlog 2", 2, False),
     ],
 )
+@pytest.mark.parametrize("text_only", [False, True])
 async def test_picture_commands_query_redact_and_send_pages(
-    env, command, count, warning
+    env, command, count, warning, text_only
 ):
     pages = [png_bytes("red"), png_bytes("blue")]
     env.plugin.picture_renderer.render = AsyncMock(return_value=pages)
@@ -55,6 +56,11 @@ async def test_picture_commands_query_redact_and_send_pages(
         count = env.plugin_config[
             "chatlog_default_count" if is_chatlog else "logs_default_count"
         ]
+    if text_only:
+        command += " --text"
+        env.context.get_registered_star = Mock(
+            side_effect=AssertionError("Unexpected browser service check")
+        )
     event = env.event(command, group="group" if is_chatlog else None, admin=False)
     env.broker.log_cache.clear()
     for i in range(70):
@@ -83,6 +89,25 @@ async def test_picture_commands_query_redact_and_send_pages(
     )
 
     await env.scheduler.execute(event)
+
+    if text_only:
+        env.plugin.picture_renderer.render.assert_not_awaited()
+        env.context.get_registered_star.assert_not_called()
+        text = "".join(event.sent)
+        assert "secret-log" not in text and "secret-chat" not in text
+        assert "已改为文本" not in text
+        assert f"显示最近 {count} 条" in text
+        if is_chatlog:
+            assert f"call-{15 - count}" in text and "call-14" in text
+            manager.get_conversation.assert_awaited_once()
+        else:
+            indices = [index for index in range(70) if not warning or index % 2][
+                -count:
+            ]
+            assert all(f"line-{index} api_key=[已隐藏]" in text for index in indices)
+        assert event.send.await_count == 1
+        assert event.is_stopped() and event.call_llm is False and not env.model_calls
+        return
 
     document = env.plugin.picture_renderer.render.call_args.args[0]
     if is_chatlog:
@@ -114,12 +139,12 @@ async def test_picture_commands_query_redact_and_send_pages(
 @pytest.mark.parametrize(
     "command,group,message",
     [
-        ("/logs-pic", "group", "私聊"),
-        ("/logs-pic 0", None, "参数"),
-        ("/logs-pic warning 101", None, "参数"),
-        ("/logs-pic nope", None, "参数"),
-        ("/chatlog-pic extra 1", None, "/chatlog-pic"),
-        ("/chatlog-pic", None, "没有选中的对话"),
+        ("/logs", "group", "私聊"),
+        ("/logs 0", None, "参数"),
+        ("/logs warning 101", None, "参数"),
+        ("/logs nope", None, "参数"),
+        ("/chatlog extra 1", None, "/chatlog"),
+        ("/chatlog", None, "没有选中的对话"),
     ],
 )
 async def test_picture_command_errors_do_not_render(env, command, group, message):
@@ -142,23 +167,123 @@ async def test_picture_chatlog_rejects_other_session_before_rendering(env):
     manager.get_conversation.return_value = SimpleNamespace(
         user_id="other", platform_id="qq_one"
     )
-    event = env.event("/chatlog-pic", admin=False)
+    event = env.event("/chatlog", admin=False)
     await env.scheduler.execute(event)
     assert "归属" in "".join(event.sent)
     env.plugin.picture_renderer.render.assert_not_awaited()
 
 
-async def test_render_error_is_explicit_and_does_not_send_raw_records(env):
-    env.plugin.picture_renderer.render = AsyncMock(
-        side_effect=RenderError("无法启动本地 Chromium")
-    )
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "浏览器服务不可用",
+        "图片渲染依赖未安装",
+        "图片渲染超时（120 秒）",
+        "无法启动本地 Chromium",
+        "本地图片渲染失败 api_key=render-secret",
+    ],
+)
+async def test_render_error_falls_back_to_sanitized_log_snapshot(env, reason, caplog):
+    async def fail_render(document):
+        assert document.blocks[0].text == "diagnostic-only api_key=[已隐藏]"
+        env.broker.log_cache.clear()
+        env.broker.publish({"level": "INFO", "time": 1, "data": "new-record"})
+        raise RenderError(reason)
+
+    env.plugin.picture_renderer.render = AsyncMock(side_effect=fail_render)
     env.broker.log_cache.clear()
-    env.broker.publish({"level": "INFO", "time": 0, "data": "diagnostic-only"})
-    event = env.event("/logs-pic", admin=False)
+    env.broker.publish(
+        {"level": "INFO", "time": 0, "data": "diagnostic-only api_key=log-secret"}
+    )
+    event = env.event("/logs", admin=False)
     await env.scheduler.execute(event)
-    assert "无法启动本地 Chromium" in "".join(event.sent)
-    assert "diagnostic-only" not in "".join(event.sent)
+    text = "".join(event.sent)
+    assert "图片渲染不可用，已改为文本" in text
+    assert "diagnostic-only api_key=[已隐藏]" in text
+    assert "log-secret" not in text and "new-record" not in text
+    assert reason.partition(" api_key=")[0] in caplog.text
+    assert "render-secret" not in caplog.text and "render-secret" not in text
+    env.plugin.picture_renderer.render.assert_awaited_once()
     assert event.send.await_count == 1 and not env.model_calls
+    assert event.is_stopped() and event.call_llm is False
+
+
+async def test_missing_browser_service_automatically_falls_back_to_text(env):
+    env.context.get_registered_star = Mock(return_value=None)
+    env.broker.log_cache.clear()
+    env.broker.publish({"level": "INFO", "time": 0, "data": "without-browser"})
+    event = env.event("/logs", admin=False)
+    await env.scheduler.execute(event)
+    text = "".join(event.sent)
+    assert "已改为文本" in text and "without-browser" in text
+    env.context.get_registered_star.assert_called_once_with("astrbot_plugin_browser")
+    assert event.send.await_count == 1 and not env.model_calls
+
+
+async def test_chatlog_render_failure_does_not_read_history_twice(env):
+    event = env.event("/chatlog", admin=False)
+    manager = env.context.conversation_manager
+    manager.get_curr_conversation_id.return_value = "cid"
+    conversation = SimpleNamespace(
+        user_id=event.unified_msg_origin,
+        platform_id="qq_one",
+        history='[{"role":"user","content":"snapshot api_key=chat-secret"}]',
+    )
+    manager.get_conversation.return_value = conversation
+
+    async def fail_render(document):
+        assert "chat-secret" not in document.blocks[0].text
+        conversation.history = '[{"role":"user","content":"changed-history"}]'
+        raise RenderError("浏览器服务不可用")
+
+    env.plugin.picture_renderer.render = AsyncMock(side_effect=fail_render)
+    await env.scheduler.execute(event)
+    text = "".join(event.sent)
+    assert "已改为文本" in text and "snapshot api_key=[已隐藏]" in text
+    assert "chat-secret" not in text and "changed-history" not in text
+    manager.get_curr_conversation_id.assert_awaited_once()
+    manager.get_conversation.assert_awaited_once()
+    assert event.send.await_count == 1 and not env.model_calls
+
+
+@pytest.mark.parametrize("command", ["/logs", "/logs warning", "/chatlog", "/ctx"])
+@pytest.mark.parametrize(
+    "arguments,message",
+    [
+        ("--text --text", "不能重复"),
+        ("2 --text --text", "不能重复"),
+        ("--text 2", "末尾"),
+        ("--unknown", "未知选项"),
+        ("2 --unknown", "未知选项"),
+        ("2 extra --text", "参数过多"),
+    ],
+)
+async def test_output_options_fail_before_queries_or_rendering(
+    env, command, arguments, message
+):
+    env.plugin.picture_renderer.render = AsyncMock()
+    event = env.event(f"{command} {arguments}", admin=False)
+    await env.scheduler.execute(event)
+    assert message in "".join(event.sent)
+    assert "[--text]" in "".join(event.sent)
+    manager = env.context.conversation_manager
+    manager.get_curr_conversation_id.assert_not_awaited()
+    manager.get_conversation.assert_not_awaited()
+    env.plugin.picture_renderer.render.assert_not_awaited()
+    assert event.is_stopped() and not env.model_calls
+
+
+async def test_delivery_error_does_not_trigger_text_fallback(env):
+    env.plugin.picture_renderer.render = AsyncMock(return_value=[png_bytes("red")])
+    env.plugin.reply = AsyncMock()
+    event = env.event()
+    replies = env.plugin.reply_diagnostic(
+        event, "fallback", PictureDocument("test", "", ())
+    )
+    await anext(replies)
+    with pytest.raises(RuntimeError, match="delivery failed"):
+        await replies.athrow(RuntimeError("delivery failed"))
+    env.plugin.reply.assert_not_awaited()
 
 
 @pytest.mark.parametrize(

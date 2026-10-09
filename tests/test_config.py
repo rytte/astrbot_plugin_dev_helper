@@ -54,7 +54,7 @@ async def test_commands_use_saved_defaults_and_allow_explicit_overrides(
             env.broker.log_cache.clear()
             env.broker.log_cache.extend(records)
         event = env.event()
-        await env.invoke(method, event, f"{arguments} {suffix}".strip())
+        await env.invoke(method, event, f"{arguments} {suffix} --text".strip())
         text = "".join(event.sent)
         assert "显示最近 " + str(count) + " 条" in text
         assert [int(i) for i in re.findall(r"entry\[(\d+)\]", text)] == indices[-count:]
