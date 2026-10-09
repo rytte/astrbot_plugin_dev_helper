@@ -146,7 +146,7 @@
 /term cd "子目录 with space"
 ```
 
-- Windows 优先使用 PATH 中的 PowerShell 7（`pwsh`），否则使用 Windows PowerShell；不加载个人 profile。Linux/macOS 使用 `/bin/sh`。
+- Windows 优先使用 PATH 中的 PowerShell 7（`pwsh`），否则使用 Windows PowerShell；不加载个人 profile，默认抑制进度消息，避免模块初始化的 CLIXML 噪声混入结果；正常输出、错误和退出码仍会保留。Linux/macOS 使用 `/bin/sh`。
 - 初始目录沿用 AstrBot 当前会话的本地工具工作区。成功的 `cd` 或 `Set-Location` 会保留到后续命令，按会话和管理员身份隔离，不改变 AstrBot 主进程的工作目录。
 - 每次启动独立 shell，**只保留工作目录**，不保留 shell 变量、环境变量修改、函数、别名或后台任务；不支持交互式编辑器和密码输入。
 - 工作区设置变化、插件重载或 AstrBot 重启会重置目录；命令是否可用由系统环境和已安装程序决定。

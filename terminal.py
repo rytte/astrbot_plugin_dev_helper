@@ -155,6 +155,7 @@ class TerminalRunner:
                 return "'" + str(path).replace("'", "''") + "'"
 
             wrapper = f"""
+$ProgressPreference = 'SilentlyContinue'
 $OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $global:LASTEXITCODE = 0
 $devHelperExitCode = 0

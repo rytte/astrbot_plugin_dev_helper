@@ -186,6 +186,85 @@ def native_shell(request, monkeypatch):
         )
 
 
+@pytest.fixture(params=["powershell", "pwsh"])
+def powershell_shell(request, monkeypatch):
+    if os.name != "nt":
+        pytest.skip("PowerShell execution tests require Windows")
+    original_which = shutil.which
+    executable = original_which(request.param)
+    if executable is None:
+        pytest.skip(f"{request.param} is not installed")
+
+    def select_shell(name):
+        if name in {"powershell", "pwsh"}:
+            return executable if name == request.param else None
+        return original_which(name)
+
+    monkeypatch.setattr(shutil, "which", select_shell)
+
+
+async def test_powershell_listing_has_no_progress_xml(tmp_path, powershell_shell):
+    (tmp_path / "example.txt").write_text("example", encoding="utf-8")
+    runner = TerminalRunner()
+    try:
+        result = await runner.execute(("session", "admin"), tmp_path, "ls")
+        assert result.exit_code == 0 and "example.txt" in result.output
+        assert "#< CLIXML" not in result.output and "<Objs" not in result.output
+        assert "正在准备首次使用模块" not in result.output
+    finally:
+        await runner.close()
+
+
+async def test_powershell_progress_does_not_pollute_output(tmp_path, powershell_shell):
+    runner = TerminalRunner()
+    try:
+        result = await runner.execute(
+            ("session", "admin"),
+            tmp_path,
+            "Write-Progress -Activity 'progress-noise' -Status 'progress-status' "
+            "-PercentComplete 50\nWrite-Output 'visible-output 中文'",
+        )
+        assert result.exit_code == 0 and "visible-output 中文" in result.output
+        assert "progress-noise" not in result.output
+        assert "progress-status" not in result.output
+        assert "#< CLIXML" not in result.output and "<Objs" not in result.output
+    finally:
+        await runner.close()
+
+
+async def test_powershell_keeps_literal_clixml_output(tmp_path, powershell_shell):
+    payload = '#< CLIXML\n<Objs><Obj S="progress">literal-xml</Obj></Objs>'
+    runner = TerminalRunner()
+    try:
+        result = await runner.execute(
+            ("session", "admin"), tmp_path, f"Write-Output {quote(payload)}"
+        )
+        assert result.exit_code == 0
+        assert result.output.replace("\r\n", "\n").strip() == payload
+    finally:
+        await runner.close()
+
+
+@pytest.mark.parametrize("error_kind", ["native", "powershell"])
+async def test_powershell_keeps_errors_and_exit_codes(
+    tmp_path, powershell_shell, error_kind
+):
+    command = (
+        python_command(
+            "import sys; print('normal-output'); print('real-error', file=sys.stderr); sys.exit(7)"
+        )
+        if error_kind == "native"
+        else "Write-Output 'normal-output'\nWrite-Error 'real-error'"
+    )
+    runner = TerminalRunner()
+    try:
+        result = await runner.execute(("session", "admin"), tmp_path, command)
+        assert "normal-output" in result.output and "real-error" in result.output
+        assert result.exit_code == (7 if error_kind == "native" else 1)
+    finally:
+        await runner.close()
+
+
 async def test_native_cd_ls_cat_git_and_session_isolation(tmp_path, native_shell):
     runner = TerminalRunner()
     root = tmp_path / "工作区 with space's"
