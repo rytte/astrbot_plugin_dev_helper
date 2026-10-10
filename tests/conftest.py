@@ -89,7 +89,6 @@ async def env(monkeypatch, plugin_config):
             importlib.import_module(module_name), "star_handlers_registry", registry
         )
     for module_name in (
-        "astrbot_plugin_dev_helper.catalog",
         "astrbot.core.star.star_handler",
         "astrbot.core.pipeline.waking_check.stage",
         "astrbot.core.pipeline.context_utils",

@@ -53,10 +53,9 @@ async def test_tool_registration_discovery_idempotency_and_schema(env):
     assert env.manager.func_list == [tool]
     await env.plugin.initialize()
     assert env.manager.func_list == [tool]
-    entries = env.catalog.tool_entries(env.manager)
-    assert entries[0].name == "dev_helper_persona"
-    assert entries[0].plugin == "astrbot_plugin_dev_helper"
-    assert "payload" in entries[0].details
+    assert tool.name == "dev_helper_persona"
+    assert tool.handler_module_path == env.main.__name__
+    assert "payload" in tool.parameters["properties"]
     parameters = tool.parameters
     jsonschema.Draft202012Validator.check_schema(parameters)
     jsonschema.validate(

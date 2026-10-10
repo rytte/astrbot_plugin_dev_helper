@@ -24,44 +24,36 @@ from astrbot.core.process_restart import restart_process
 from astrbot.core.star import star_handler
 from astrbot.core.star.filter.command import GreedyStr
 
-from .catalog import (
-    command_conflicts,
-    command_entries,
-    terminal_dot_conflicts,
-    tool_entries,
-)
+from .catalog import command_conflicts, terminal_dot_conflicts
 from .context_usage import ContextUsage, format_round, history_hashes, usage_picture
 from .desktop_restart import schedule_desktop_restart
 from .display import history_text, positive_number, redact
 from .pictures import LocalPictureRenderer, PictureBlock, PictureDocument, RenderError
-from .plugin_reload import clear_plugin_bytecode
 from .terminal import TerminalRunner, session_workspace
 
-DEV_USAGE = "/dev commands [页码]\n/dev tools [页码]\n/dev plugin <插件标识> [页码]"
 LOG_USAGE = "/logs [条目数] [--text]\n/logs warning [条目数] [--text]"
 CHATLOG_USAGE = "/chatlog [条目数] [--text]"
 CTX_USAGE = "/ctx [轮数] [--text]"
 TERM_USAGE = "/term <命令>\n/term enter 开启点号模式\n/term exit 关闭点号模式"
 HELP = (
-    "\n查询\n"
-    + DEV_USAGE
-    + "\n\n日志与对话\n"
+    "开发助手（仅限 AstrBot 管理员）\n"
+    "/dev：查看本帮助，不接受参数。\n\n"
+    "日志与对话\n"
     + LOG_USAGE
     + "\n"
     + CHATLOG_USAGE
     + "\n"
     + CTX_USAGE
+    + "\n日志仅限私聊；对话与上下文查询可在当前群聊使用。"
     + "\n默认输出图片，渲染不可用时回退文本；--text 强制文本，须放在参数末尾。"
-    + "\n\n插件管理（管理员，群聊和私聊均可）\n/plugin reload <插件名>"
-    + "\n\n管理（管理员私聊）\n"
+    + "\n\n终端与重启（仅限管理员私聊）\n"
     + TERM_USAGE
-    + "\n点号模式下 .ls 等同于 /term ls；10 分钟无终端操作自动退出。\n/restart"
-    + "\n/plugin remove <插件名> [--all]"
+    + "\n点号模式下 .ls 等同于 /term ls；10 分钟无终端操作自动退出。"
+    + "\n/restart：申请重启，60 秒内使用 /restart confirm 确认。"
+    + "\n\n插件管理、指令与模型工具查询请使用插件管家：/pm help。"
 )
-PAGE_SIZE = 20
 CONFIRM_SECONDS = 60
 TERMINAL_DOT_SECONDS = 10 * 60
-
 
 def output_arguments(arguments: str) -> tuple[list[str], bool]:
     args = arguments.split()
@@ -133,9 +125,6 @@ class Main(Star):
         self._terminal_dot_modes: dict[tuple[str, str], float] = {}
         self._restart_confirmations: dict[tuple[str, str], float] = {}
         self._restart_started = False
-        self._plugin_removals: dict[
-            tuple[str, str], tuple[float, str, str, object, bool]
-        ] = {}
 
     def get_browser_service(self):
         metadata = self.context.get_registered_star("astrbot_plugin_browser")
@@ -191,6 +180,22 @@ class Main(Star):
             await self.reply(event, "开发助手命令冲突：" + "、".join(conflicts))
             return False
         return True
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("dev", desc="查看开发助手帮助，不接受参数。")
+    async def dev(
+        self, event: AstrMessageEvent, arguments: GreedyStr
+    ) -> AsyncIterator[None]:
+        """Show administrator help without reading diagnostic data or catalogs."""
+        if await self.authorize(event):
+            await self.reply(
+                event,
+                "用法：/dev（仅显示开发助手帮助，不接受参数）。"
+                if arguments.strip()
+                else HELP,
+            )
+        yield
+        event.stop_event()
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command(
@@ -265,251 +270,6 @@ class Main(Star):
             self.logger.exception("Failed to start AstrBot restart task.")
             await self.reply(event, "启动重启任务失败，请检查 AstrBot 日志。")
             yield
-        event.stop_event()
-
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command(
-        "plugin reload",
-        desc="立即重载已启用插件：plugin reload <插件名>。支持开发助手自重载。",
-    )
-    async def plugin_reload(
-        self, event: AstrMessageEvent, arguments: GreedyStr
-    ) -> AsyncIterator[None]:
-        """Reload exactly one plugin using AstrBot's locked lifecycle operations.
-
-        Args:
-            event: Authenticated command event.
-            arguments: A registered plugin name or directory name.
-        """
-        if not await self.authorize(event):
-            yield
-            event.stop_event()
-            return
-
-        tokens = arguments.split()
-        if len(tokens) != 1 or tokens[0].startswith("--"):
-            await self.reply(event, "用法：/plugin reload <插件名>；无需二次确认。")
-            yield
-            event.stop_event()
-            return
-
-        manager = self.context._star_manager
-        if manager is None:
-            await self.reply(event, "插件管理器不可用，无法重载插件。")
-            yield
-            event.stop_event()
-            return
-
-        canonical_name = tokens[0]
-        try:
-            from astrbot.dashboard.services.plugin_service import PluginService
-
-            service = PluginService(None, manager)
-            service._ensure_not_demo()
-            plugin = service.find_plugin_by_name(tokens[0])
-            if plugin is None:
-                raise ValueError(
-                    f"未找到已加载插件 {tokens[0]}。加载失败的插件请在 WebUI 中重载。"
-                )
-            if not plugin.activated:
-                raise ValueError("该插件已停用，请先启用插件，再执行重载命令。")
-            if (
-                not plugin.name
-                or not plugin.module_path
-                or not plugin.root_dir_name
-                or plugin.star_cls is None
-            ):
-                raise ValueError("插件加载状态不完整，请在 WebUI 中检查插件状态。")
-
-            canonical_name = plugin.name
-            module_path = plugin.module_path
-            root_dir_name = plugin.root_dir_name
-            reserved = plugin.reserved
-            previous_instance = plugin.star_cls
-            await self.reply(event, f"正在重载插件 {canonical_name}。")
-            yield
-
-            async with manager._pm_lock:
-                current = service.find_plugin_by_name(tokens[0])
-                if (
-                    current is not plugin
-                    or not current.activated
-                    or current.name != canonical_name
-                    or current.module_path != module_path
-                    or current.root_dir_name != root_dir_name
-                    or current.reserved != reserved
-                    or current.star_cls is not previous_instance
-                ):
-                    raise ValueError("插件状态已变化，未执行重载，请重新发送命令。")
-
-                try:
-                    await asyncio.to_thread(
-                        clear_plugin_bytecode,
-                        manager.reserved_plugin_path
-                        if reserved
-                        else manager.plugin_store_path,
-                        root_dir_name,
-                    )
-                    await manager._terminate_plugin(current)
-                    await manager._unbind_plugin(canonical_name, module_path)
-                    success, error = await manager.load(
-                        specified_module_path=module_path
-                    )
-                except ValueError as exc:
-                    raise RuntimeError(str(exc)) from exc
-                if not success:
-                    raise RuntimeError(error or "插件加载失败。")
-                reloaded = next(
-                    (
-                        item
-                        for item in self.context.get_all_stars()
-                        if item.module_path == module_path
-                    ),
-                    None,
-                )
-                if (
-                    reloaded is None
-                    or not reloaded.name
-                    or not reloaded.activated
-                    or reloaded.star_cls is None
-                    or reloaded.star_cls is previous_instance
-                ):
-                    raise RuntimeError("主程序未重新注册并初始化该插件。")
-                canonical_name = reloaded.name
-
-            await service.sync_skills_after_plugin_change()
-        except ValueError as exc:
-            await self.reply(event, str(exc))
-        except Exception as exc:
-            self.logger.exception("Failed to reload plugin %s.", canonical_name)
-            await self.reply(
-                event,
-                f"重载插件 {canonical_name} 失败：{exc}\n"
-                "请检查 AstrBot 日志，并在 WebUI 中检查或恢复插件。",
-            )
-        else:
-            await self.reply(event, f"插件 {canonical_name} 已重载。")
-        yield
-        event.stop_event()
-
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command(
-        "plugin remove",
-        desc="确认后卸载插件：plugin remove <插件名> [--all]。仅限管理员私聊。",
-    )
-    async def plugin_remove(
-        self, event: AstrMessageEvent, arguments: GreedyStr
-    ) -> AsyncIterator[None]:
-        """Uninstall a plugin through the same service used by the WebUI."""
-        if not await self.authorize(event):
-            yield
-            event.stop_event()
-            return
-        if not event.is_private_chat():
-            await self.reply(event, "请在管理员私聊中卸载插件。")
-            yield
-            event.stop_event()
-            return
-
-        tokens = arguments.split()
-        usage = (
-            "用法：/plugin remove <插件名> [--all]；"
-            "确认时发送 /plugin remove <插件名> [--all] confirm。"
-        )
-        if not tokens or tokens[1:] not in (
-            [],
-            ["--all"],
-            ["confirm"],
-            ["--all", "confirm"],
-        ):
-            await self.reply(event, usage)
-            yield
-            event.stop_event()
-            return
-        delete_all = "--all" in tokens[1:]
-        confirming = tokens[-1] == "confirm" and len(tokens) > 1
-
-        manager = self.context._star_manager
-        if manager is None:
-            await self.reply(event, "插件管理器不可用，无法卸载插件。")
-            yield
-            event.stop_event()
-            return
-        from astrbot.dashboard.services.plugin_service import PluginService
-
-        service = PluginService(None, manager)
-        name = tokens[0]
-        plugin = service.find_plugin_by_name(name)
-        failed_plugins = manager.failed_plugin_dict
-        failed = plugin is None and name in failed_plugins
-        if plugin is None and not failed:
-            await self.reply(event, f"未找到插件 {name}。")
-            yield
-            event.stop_event()
-            return
-        if plugin is not None and plugin.reserved:
-            await self.reply(event, "该插件是 AstrBot 保留插件，无法卸载。")
-            yield
-            event.stop_event()
-            return
-
-        canonical_name = name if failed else plugin.name
-        kind = "failed" if failed else "loaded"
-        identity = failed_plugins[name] if failed else plugin
-        key = (event.unified_msg_origin, event.get_sender_id())
-        if not confirming:
-            self._plugin_removals[key] = (
-                time.monotonic() + CONFIRM_SECONDS,
-                canonical_name,
-                kind,
-                identity,
-                delete_all,
-            )
-            scope = (
-                "将删除插件文件、配置和数据。"
-                if delete_all
-                else "将删除插件文件，保留配置和数据。"
-            )
-            option = " --all" if delete_all else ""
-            await self.reply(
-                event,
-                f"确认卸载 {canonical_name}？{scope}"
-                f"请在 60 秒内发送 /plugin remove {canonical_name}{option} confirm。",
-            )
-            yield
-            event.stop_event()
-            return
-
-        pending = self._plugin_removals.pop(key, None)
-        if (
-            pending is None
-            or time.monotonic() >= pending[0]
-            or canonical_name != pending[1]
-            or kind != pending[2]
-            or identity is not pending[3]
-            or delete_all != pending[4]
-        ):
-            await self.reply(event, "卸载确认已过期或插件状态已变化，请重新发送命令。")
-            yield
-            event.stop_event()
-            return
-
-        await self.reply(event, f"正在卸载插件 {canonical_name}。")
-        yield
-        try:
-            payload = {"delete_config": delete_all, "delete_data": delete_all}
-            if failed:
-                await service.uninstall_failed_plugin(
-                    {"dir_name": canonical_name, **payload}
-                )
-            else:
-                await service.uninstall_plugin({"name": canonical_name, **payload})
-        except Exception as exc:
-            self.logger.exception("Failed to uninstall plugin %s.", canonical_name)
-            await self.reply(event, f"卸载插件 {canonical_name} 失败：{exc}")
-        else:
-            await self.reply(event, f"插件 {canonical_name} 已卸载。")
-        yield
         event.stop_event()
 
     def terminal_dot_mode_active(self, event: AstrMessageEvent) -> bool:
@@ -706,96 +466,6 @@ class Main(Star):
             if event.is_stopped():
                 return
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command(
-        "dev",
-        desc="查看开发助手帮助、命令与模型工具；支持 commands、tools、plugin 子命令。",
-    )
-    async def dev(
-        self, event: AstrMessageEvent, arguments: GreedyStr
-    ) -> AsyncIterator[None]:
-        """Let AstrBot deliver the result before stopping further handlers."""
-        await self._dev(event, arguments)
-        yield
-        event.stop_event()
-
-    async def _dev(self, event: AstrMessageEvent, arguments: str) -> None:
-        """Read catalogs using optional positional page numbers."""
-        if not await self.authorize(event):
-            return
-        args = arguments.split()
-        try:
-            if not args:
-                commands = command_entries()
-                tools = tool_entries(self.context.get_llm_tool_manager())
-                await self.reply(
-                    event,
-                    f"开发助手\n已注册命令（含指令组）：{len(commands)} 个\n模型工具：{len(tools)} 个\n"
-                    + HELP,
-                )
-                return
-            if args[0] in {"commands", "tools"} and len(args) <= 2:
-                page = positive_number(args[1] if len(args) == 2 else "", 1)
-                entries = (
-                    command_entries()
-                    if args[0] == "commands"
-                    else tool_entries(self.context.get_llm_tool_manager())
-                )
-                title = "命令目录" if args[0] == "commands" else "模型工具目录"
-                next_command = f"/dev {args[0]}"
-            elif args[0] == "plugin" and 2 <= len(args) <= 3:
-                page = positive_number(args[2] if len(args) == 3 else "", 1)
-                matches = [
-                    plugin
-                    for plugin in self.context.get_all_stars()
-                    if plugin.name == args[1]
-                ]
-                if len(matches) != 1:
-                    raise ValueError(
-                        "插件标识不唯一。"
-                        if matches
-                        else "插件不存在或未载入，无法取得命令与工具信息。"
-                    )
-                plugin = matches[0]
-                entries = [
-                    item
-                    for item in command_entries()
-                    + tool_entries(self.context.get_llm_tool_manager())
-                    if item.plugin == plugin.name and item.source != "MCP"
-                ]
-                title = (
-                    f"插件：{plugin.name}（{'启用' if plugin.activated else '停用'}）"
-                )
-                next_command = f"/dev plugin {args[1]}"
-                if not entries:
-                    message = (
-                        "当前没有已注册的命令或工具。"
-                        if plugin.activated
-                        else "插件已停用，命令与工具信息不可用。"
-                    )
-                    await self.reply(event, title + "\n" + message)
-                    return
-            else:
-                raise ValueError("用法：\n" + DEV_USAGE)
-            pages = max(1, (len(entries) + PAGE_SIZE - 1) // PAGE_SIZE)
-            if page > pages:
-                raise ValueError(f"页码超出范围，共 {pages} 页。")
-            selected = entries[(page - 1) * PAGE_SIZE : page * PAGE_SIZE]
-            lines = [
-                f"{title}｜共 {len(entries)} 项｜第 {page}/{pages} 页",
-                "状态来自注册信息，会话权限及实际请求仍需另行判定。",
-            ]
-            lines.extend(entry.render() for entry in selected)
-            if not selected:
-                lines.append("当前没有已注册的条目。")
-            if page < pages:
-                lines.append(f"下一页：{next_command} {page + 1}")
-            await self.reply(event, "\n\n".join(lines))
-        except ValueError as error:
-            await self.reply(event, str(error))
-        except Exception:
-            self.logger.exception("Failed to read the command/tool catalog.")
-            await self.reply(event, "命令或工具目录读取失败，请检查 AstrBot 日志。")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command(

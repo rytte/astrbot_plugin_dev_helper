@@ -6,10 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from astrbot.core.agent.tool import FunctionTool
 from astrbot.core.star.filter.command import CommandFilter
-from astrbot.core.star.filter.command_group import CommandGroupFilter
-from astrbot.core.star.filter.permission import PermissionType, PermissionTypeFilter
 from astrbot.core.star.star import StarMetadata
 from astrbot.core.star.star_handler import EventType, StarHandlerMetadata
 from astrbot_plugin_dev_helper.display import history_text, redact
@@ -19,11 +16,9 @@ def output(event):
     return "".join(event.sent)
 
 
-async def test_real_pipeline_dispatches_help_and_root_subcommands(env):
+async def test_real_pipeline_dispatches_diagnostic_commands(env):
     for command, expected in (
         ("/dev", "开发助手"),
-        ("/dev commands", "命令目录"),
-        ("/dev tools", "模型工具目录"),
         ("/chatlog", "没有选中的对话"),
         ("/logs warning 2", "缓存"),
     ):
@@ -95,8 +90,6 @@ async def test_removed_command_is_available_to_other_plugins(env, command):
         "/ctx --text",
         "/term ls",
         "/restart",
-        "/plugin reload anything",
-        "/plugin remove anything",
     ],
 )
 async def test_non_admin_is_denied_by_real_pipeline(env, command):
@@ -115,8 +108,6 @@ async def test_non_admin_is_denied_by_real_pipeline(env, command):
         "ctx",
         "term",
         "restart",
-        "plugin_reload",
-        "plugin_remove",
     ],
 )
 async def test_direct_calls_and_api_role_cannot_bypass_authorization(env, method):
@@ -146,10 +137,7 @@ async def test_direct_calls_and_api_role_cannot_bypass_authorization(env, method
         ("ctx", "0"),
         ("ctx", "101"),
         ("ctx", "5 extra"),
-        ("dev", "plugins"),
         ("restart", "now"),
-        ("plugin_reload", "demo --all"),
-        ("plugin_remove", "demo --force"),
     ],
 )
 async def test_unknown_or_discarded_syntax_is_rejected(env, method, arguments):
@@ -274,60 +262,6 @@ async def test_chatlog_empty_and_missing_do_not_create(env):
     assert "当前对话记录为空" in output(event)
 
 
-async def test_catalog_counts_builtin_disabled_tools_and_paginates(env):
-    env.manager.func_list = [
-        FunctionTool(
-            name=f"demo_{index:02d}",
-            description="desc",
-            parameters={},
-            handler_module_path="demo.main",
-            active=index != 0,
-        )
-        for index in range(23)
-    ]
-    env.manager.iter_builtin_tools = lambda: [
-        FunctionTool(name="builtin", description="builtin", parameters={})
-    ]
-    event = env.event()
-    await env.invoke("dev", event, "")
-    assert "模型工具：24 个" in output(event)
-    event = env.event()
-    await env.invoke("dev", event, "tools 1")
-    assert "已停用" in output(event) and "下一页：/dev tools 2" in output(event)
-    event = env.event()
-    await env.invoke("dev", event, "tools 2")
-    assert "第 2/2 页" in output(event) and "demo_22" in output(event)
-
-
-async def test_group_aliases_permission_and_parent_disabled_state(env):
-    async def action(self, event, count: int):
-        raise AssertionError("Catalogs must never invoke commands")
-
-    parent = StarHandlerMetadata(
-        EventType.AdapterMessageEvent, "demo_group", "group", "demo.main", action, []
-    )
-    group = CommandGroupFilter("manage", alias={"m"})
-    parent.event_filters = [group, PermissionTypeFilter(PermissionType.ADMIN)]
-    parent.enabled = False
-    child = StarHandlerMetadata(
-        EventType.AdapterMessageEvent,
-        "demo_action",
-        "action",
-        "demo.main",
-        action,
-        [],
-        desc="Example",
-    )
-    command = CommandFilter("echo", {"say"}, child, group.get_complete_command_names())
-    child.event_filters = [command]
-    env.registry.append(parent)
-    env.registry.append(child)
-    env.owners["demo.main"] = StarMetadata(name="demo", activated=True, reserved=True)
-    entry = next(
-        item for item in env.catalog.command_entries() if item.name == "manage echo"
-    )
-    assert entry.source == "内置" and "停用" in entry.status
-    assert "管理员" in entry.details and "m say" in entry.details
 
 
 @pytest.mark.parametrize("command", ["dev", "logs", "chatlog", "ctx", "restart"])
@@ -379,30 +313,6 @@ def test_redaction_and_media_summary_do_not_destroy_normal_text():
     assert "hi" in text and "多媒体" in text and "private-image-location" not in text
 
 
-async def test_real_builtin_and_mcp_tool_metadata_are_listed_without_calls(env):
-    import mcp.types
-    from astrbot.core.agent.mcp_client import MCPTool
-    from astrbot.core.provider.func_tool_manager import FunctionToolManager
-
-    manager = FunctionToolManager()
-    client = SimpleNamespace(call_tool_with_reconnect=AsyncMock())
-    tool = MCPTool(
-        mcp.types.Tool(
-            name="search.demo", description="MCP search", inputSchema={"type": "object"}
-        ),
-        client,
-        "demo_server",
-    )
-    manager.func_list.append(tool)
-    entries = env.catalog.tool_entries(manager)
-    assert any(entry.source == "内置" for entry in entries)
-    assert any(
-        entry.source == "MCP"
-        and entry.plugin == "demo_server"
-        and entry.name == tool.name
-        for entry in entries
-    )
-    client.call_tool_with_reconnect.assert_not_awaited()
 
 
 async def test_current_session_isolation_is_resolved_by_real_waking_stage(env):

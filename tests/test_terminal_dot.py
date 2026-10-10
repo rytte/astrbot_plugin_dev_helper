@@ -120,7 +120,7 @@ async def test_dot_only_removes_one_prefix_and_does_not_parse_controls(
     assert not env.model_calls
 
 
-@pytest.mark.parametrize("text", ["普通聊天", "hello .ls", "/dev", "/logs --text"])
+@pytest.mark.parametrize("text", ["普通聊天", "hello .ls", "/chatlog --text", "/logs --text"])
 async def test_chat_and_other_commands_do_not_execute_or_extend_mode(dot_env, text):
     env = dot_env
     entered = await dispatch(env, "/term enter")

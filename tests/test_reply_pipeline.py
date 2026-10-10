@@ -6,14 +6,13 @@ from unittest.mock import AsyncMock
 
 import pytest
 from astrbot.api.message_components import Node, Plain
-from astrbot.core.agent.tool import FunctionTool
 from astrbot.core.pipeline.result_decorate import stage as decorate_module
 from astrbot.core.star.star import StarMetadata
 from astrbot.core.star.star_handler import EventType, StarHandlerMetadata
 
 
 @pytest.mark.parametrize(
-    "command", ["/dev tools", "/logs 1 --text", "/chatlog 1 --text"]
+    "command", ["/logs 1 --text", "/chatlog 1 --text"]
 )
 @pytest.mark.parametrize(
     "platform_name,threshold,forwarded",
@@ -28,10 +27,6 @@ async def test_long_replies_follow_core_forward_settings(
     renderer = AsyncMock(side_effect=AssertionError("Unexpected text-to-image request"))
     monkeypatch.setattr(decorate_module.html_renderer, "render_t2i", renderer)
     payload = "visible " * 2200 + "api_key=reply-secret"
-    env.manager.func_list = [
-        FunctionTool(name=f"tool_{i}", description="visible " * 250, parameters={})
-        for i in range(12)
-    ]
     env.broker.log_cache.clear()
     env.broker.publish({"level": "INFO", "time": 1000, "data": payload})
     event = env.event(command, admin=False, platform_name=platform_name)
@@ -52,17 +47,16 @@ async def test_long_replies_follow_core_forward_settings(
     text = "".join(event.sent)
     assert len(text) > 14000
     assert "visible" in text and "reply-secret" not in text
-    if command == "/dev tools":
-        assert all(f"tool_{i}" in text for i in range(12))
-        assert text.count("visible " * 250) == 12
-    else:
-        assert "[已隐藏]" in text
+    assert "[已隐藏]" in text
     assert event.is_stopped() and event.call_llm is False
     assert not env.model_calls
     renderer.assert_not_awaited()
 
 
-async def test_response_is_sent_before_stopping_later_handlers(env):
+@pytest.mark.parametrize(
+    "command,expected", [("/dev", "开发助手"), ("/logs --text", "缓存")]
+)
+async def test_response_is_sent_before_stopping_later_handlers(env, command, expected):
     calls = []
 
     async def observer(event):
@@ -79,11 +73,11 @@ async def test_response_is_sent_before_stopping_later_handlers(env):
         )
     )
     env.owners["observer.main"] = StarMetadata(name="observer", activated=True)
-    event = env.event("/dev", admin=False)
+    event = env.event(command, admin=False)
 
     await env.scheduler.execute(event)
 
-    assert "开发助手" in "".join(event.sent)
+    assert expected in "".join(event.sent)
     event.send.assert_awaited_once()
     assert event.is_stopped()
     assert not calls and not env.model_calls
