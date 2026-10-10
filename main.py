@@ -34,6 +34,7 @@ from .context_usage import ContextUsage, format_round, history_hashes, usage_pic
 from .desktop_restart import schedule_desktop_restart
 from .display import history_text, positive_number, redact
 from .pictures import LocalPictureRenderer, PictureBlock, PictureDocument, RenderError
+from .plugin_reload import clear_plugin_bytecode
 from .terminal import TerminalRunner, session_workspace
 
 DEV_USAGE = "/dev commands [页码]\n/dev tools [页码]\n/dev plugin <插件标识> [页码]"
@@ -51,6 +52,7 @@ HELP = (
     + "\n"
     + CTX_USAGE
     + "\n默认输出图片，渲染不可用时回退文本；--text 强制文本，须放在参数末尾。"
+    + "\n\n插件管理（管理员，群聊和私聊均可）\n/plugin reload <插件名>"
     + "\n\n管理（管理员私聊）\n"
     + TERM_USAGE
     + "\n点号模式下 .ls 等同于 /term ls；10 分钟无终端操作自动退出。\n/restart"
@@ -263,6 +265,131 @@ class Main(Star):
             self.logger.exception("Failed to start AstrBot restart task.")
             await self.reply(event, "启动重启任务失败，请检查 AstrBot 日志。")
             yield
+        event.stop_event()
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command(
+        "plugin reload",
+        desc="立即重载已启用插件：plugin reload <插件名>。支持开发助手自重载。",
+    )
+    async def plugin_reload(
+        self, event: AstrMessageEvent, arguments: GreedyStr
+    ) -> AsyncIterator[None]:
+        """Reload exactly one plugin using AstrBot's locked lifecycle operations.
+
+        Args:
+            event: Authenticated command event.
+            arguments: A registered plugin name or directory name.
+        """
+        if not await self.authorize(event):
+            yield
+            event.stop_event()
+            return
+
+        tokens = arguments.split()
+        if len(tokens) != 1 or tokens[0].startswith("--"):
+            await self.reply(event, "用法：/plugin reload <插件名>；无需二次确认。")
+            yield
+            event.stop_event()
+            return
+
+        manager = self.context._star_manager
+        if manager is None:
+            await self.reply(event, "插件管理器不可用，无法重载插件。")
+            yield
+            event.stop_event()
+            return
+
+        canonical_name = tokens[0]
+        try:
+            from astrbot.dashboard.services.plugin_service import PluginService
+
+            service = PluginService(None, manager)
+            service._ensure_not_demo()
+            plugin = service.find_plugin_by_name(tokens[0])
+            if plugin is None:
+                raise ValueError(
+                    f"未找到已加载插件 {tokens[0]}。加载失败的插件请在 WebUI 中重载。"
+                )
+            if not plugin.activated:
+                raise ValueError("该插件已停用，请先启用插件，再执行重载命令。")
+            if (
+                not plugin.name
+                or not plugin.module_path
+                or not plugin.root_dir_name
+                or plugin.star_cls is None
+            ):
+                raise ValueError("插件加载状态不完整，请在 WebUI 中检查插件状态。")
+
+            canonical_name = plugin.name
+            module_path = plugin.module_path
+            root_dir_name = plugin.root_dir_name
+            reserved = plugin.reserved
+            previous_instance = plugin.star_cls
+            await self.reply(event, f"正在重载插件 {canonical_name}。")
+            yield
+
+            async with manager._pm_lock:
+                current = service.find_plugin_by_name(tokens[0])
+                if (
+                    current is not plugin
+                    or not current.activated
+                    or current.name != canonical_name
+                    or current.module_path != module_path
+                    or current.root_dir_name != root_dir_name
+                    or current.reserved != reserved
+                    or current.star_cls is not previous_instance
+                ):
+                    raise ValueError("插件状态已变化，未执行重载，请重新发送命令。")
+
+                try:
+                    await asyncio.to_thread(
+                        clear_plugin_bytecode,
+                        manager.reserved_plugin_path
+                        if reserved
+                        else manager.plugin_store_path,
+                        root_dir_name,
+                    )
+                    await manager._terminate_plugin(current)
+                    await manager._unbind_plugin(canonical_name, module_path)
+                    success, error = await manager.load(
+                        specified_module_path=module_path
+                    )
+                except ValueError as exc:
+                    raise RuntimeError(str(exc)) from exc
+                if not success:
+                    raise RuntimeError(error or "插件加载失败。")
+                reloaded = next(
+                    (
+                        item
+                        for item in self.context.get_all_stars()
+                        if item.module_path == module_path
+                    ),
+                    None,
+                )
+                if (
+                    reloaded is None
+                    or not reloaded.name
+                    or not reloaded.activated
+                    or reloaded.star_cls is None
+                    or reloaded.star_cls is previous_instance
+                ):
+                    raise RuntimeError("主程序未重新注册并初始化该插件。")
+                canonical_name = reloaded.name
+
+            await service.sync_skills_after_plugin_change()
+        except ValueError as exc:
+            await self.reply(event, str(exc))
+        except Exception as exc:
+            self.logger.exception("Failed to reload plugin %s.", canonical_name)
+            await self.reply(
+                event,
+                f"重载插件 {canonical_name} 失败：{exc}\n"
+                "请检查 AstrBot 日志，并在 WebUI 中检查或恢复插件。",
+            )
+        else:
+            await self.reply(event, f"插件 {canonical_name} 已重载。")
+        yield
         event.stop_event()
 
     @filter.permission_type(filter.PermissionType.ADMIN)

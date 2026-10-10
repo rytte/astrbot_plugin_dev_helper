@@ -95,6 +95,7 @@ async def test_removed_command_is_available_to_other_plugins(env, command):
         "/ctx --text",
         "/term ls",
         "/restart",
+        "/plugin reload anything",
         "/plugin remove anything",
     ],
 )
@@ -114,6 +115,7 @@ async def test_non_admin_is_denied_by_real_pipeline(env, command):
         "ctx",
         "term",
         "restart",
+        "plugin_reload",
         "plugin_remove",
     ],
 )
@@ -146,6 +148,7 @@ async def test_direct_calls_and_api_role_cannot_bypass_authorization(env, method
         ("ctx", "5 extra"),
         ("dev", "plugins"),
         ("restart", "now"),
+        ("plugin_reload", "demo --all"),
         ("plugin_remove", "demo --force"),
     ],
 )
