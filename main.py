@@ -695,7 +695,7 @@ class Main(Star):
         except Exception:
             self.logger.exception("Failed to prepare context usage recording.")
 
-    @filter.on_agent_done()
+    @filter.on_agent_done(priority=-10000)
     async def capture_context_finish(
         self, event: AstrMessageEvent, run_context, response
     ):

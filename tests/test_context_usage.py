@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from astrbot.api.message_components import Image
 from astrbot.api.provider import LLMResponse, ProviderRequest
-from astrbot.core.agent.message import Message, TextPart
+from astrbot.core.agent.message import ImageURLPart, Message, TextPart
 from astrbot.core.agent.response import AgentStats
 from astrbot.core.astr_agent_hooks import MAIN_AGENT_HOOKS
 from astrbot.core.pipeline.context_utils import call_event_hook
@@ -18,7 +18,8 @@ from astrbot.core.pipeline.process_stage.method.agent_sub_stages.internal import
     InternalAgentSubStage,
 )
 from astrbot.core.provider.entities import TokenUsage
-from astrbot.core.star.star_handler import EventType
+from astrbot.core.star.star import StarMetadata
+from astrbot.core.star.star_handler import EventType, StarHandlerMetadata
 from astrbot_plugin_dev_helper.context_usage import (
     ContextUsage,
     extract_usage,
@@ -168,7 +169,15 @@ def usage_env(env):
     stage = InternalAgentSubStage.__new__(InternalAgentSubStage)
     stage.conv_manager = manager
 
-    async def turn(index, *, unknown=False, tools=False, persist=True, duplicate=False):
+    async def turn(
+        index,
+        *,
+        unknown=False,
+        tools=False,
+        persist=True,
+        duplicate=False,
+        extra_messages=(),
+    ):
         event = env.event(f"question-{index}", user="member", admin=False)
         # Ordinary members' turns in the same shared session must be recorded too.
         event.unified_msg_origin = conversation.user_id
@@ -201,6 +210,7 @@ def usage_env(env):
                     ),
                 ]
             )
+        messages.extend(extra_messages)
         response = LLMResponse(
             role="assistant",
             completion_text=f"answer-{index}",
@@ -259,6 +269,98 @@ async def test_recent_rounds_real_hooks_history_and_no_cumulative_tool_usage(usa
     await env.invoke("ctx", event, "2 --text")
     assert "最近 2 轮" in "".join(event.sent)
     assert "第 5 轮" not in "".join(event.sent)
+
+
+@pytest.mark.parametrize("tool_image", [False, True], ids=["incoming", "inspect"])
+async def test_media_finalization_precedes_usage_anchor(usage_env, tool_image):
+    env = usage_env
+    module_path = "tests.media_manager"
+    env.owners[module_path] = StarMetadata(
+        name="astrbot_plugin_media_manager", module_path=module_path, activated=True
+    )
+
+    async def lighten_history(event, run_context, response):
+        for message in run_context.messages:
+            if message.role == "tool":
+                message.content = "已加载图片，历史仅保留引用。"
+            if message.role != "user" or not isinstance(message.content, list):
+                continue
+            for part in message.content:
+                if isinstance(part, ImageURLPart) or (
+                    isinstance(part, TextPart)
+                    and part.text.startswith("[Image from tool 'media_inspect'")
+                ):
+                    part.mark_as_temp()
+            if message.content and all(part._no_save for part in message.content):
+                message._no_save = True
+
+    env.registry.append(
+        StarHandlerMetadata(
+            event_type=EventType.OnAgentDoneEvent,
+            handler_full_name=f"{module_path}_lighten_history",
+            handler_name="lighten_history",
+            handler_module_path=module_path,
+            handler=lighten_history,
+            event_filters=[],
+            extras_configs={"priority": -2000},
+        )
+    )
+    image = ImageURLPart(
+        image_url=ImageURLPart.ImageURL(url="data:image/png;base64,private-image")
+    )
+    extra_messages = []
+    if tool_image:
+        extra_messages.extend(
+            [
+                Message(
+                    role="assistant",
+                    tool_calls=[
+                        {
+                            "type": "function",
+                            "id": "inspect-call",
+                            "function": {
+                                "name": "media_inspect",
+                                "arguments": "{}",
+                            },
+                        }
+                    ],
+                ),
+                Message(
+                    role="tool",
+                    tool_call_id="inspect-call",
+                    content="Image returned and cached at path='private-image.png'.",
+                ),
+            ]
+        )
+    extra_messages.append(
+        Message(
+            role="user",
+            content=[
+                TextPart(
+                    text="[Image from tool 'media_inspect', path='private-image.png']"
+                    if tool_image
+                    else "[Media ImageRef image_ref=img_test；图片引用]"
+                ),
+                image,
+            ],
+        )
+    )
+    await env.turn(1)
+    await env.turn(2, extra_messages=extra_messages)
+    event = env.event()
+    await env.invoke("ctx", event, "--text")
+    text = "".join(event.sent)
+    assert "最近 2 轮" in text and "第 2 轮" in text and "输入：220" in text
+    assert image._no_save
+    assert "private-image" not in env.conversation.history
+    await env.turn(3)
+    env.plugin.context_usage = ContextUsage(env.plugin)
+    event = env.event()
+    await env.invoke("ctx", event, "--text")
+    text = "".join(event.sent)
+    assert "最近 3 轮" in text and "第 2 轮" in text and "输入：220" in text
+    assert len(next(iter(env.usage_storage.values()))["records"]) == 3
+    assert "private-image" not in json.dumps(env.usage_storage)
 
 
 async def test_unknown_round_does_not_reuse_previous_usage(usage_env):
